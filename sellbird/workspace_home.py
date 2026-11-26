@@ -35,6 +35,11 @@ class Home:
     mode: Mode = "self_hosted"
     # Object with keyring-style get_password / set_password; None means the default.
     secret_backend: object | None = None
+    # Projects (sellbird.projects): the project's name, and the root's data
+    # folder holding shared.db. Both None outside projects mode, which is how
+    # the code knows the shared layer is off.
+    project: str | None = None
+    shared_dir: Path | None = None
 
     @classmethod
     def for_root(
@@ -55,6 +60,27 @@ class Home:
             config_file=root / "sellbird.yaml",
             mode=mode,
             secret_backend=secret_backend,
+        )
+
+    @classmethod
+    def for_project(cls, root: Path, name: str) -> "Home":
+        """One project under ``<root>/projects/<name>``: its own config,
+        database, prompts and skills; the root's .env, mailbox tokens and
+        dashboard and agent tokens, so keys, mailboxes and the login are
+        shared."""
+        from sellbird.projects import check_name
+        folder = Path(root) / "projects" / check_name(name)
+        data = folder / "data"
+        return replace(
+            cls.for_root(Path(root)),
+            root=folder,
+            data_dir=data,
+            db_path=data / "sellbird.db",
+            prompts_dir=folder / "prompts",
+            skills_dir=folder / "skills",
+            config_file=folder / "sellbird.yaml",
+            project=name,
+            shared_dir=Path(root) / "data",
         )
 
     @property
