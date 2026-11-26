@@ -9,6 +9,20 @@ A PID file can outlive its loop (a crash, a reboot) and name whatever process
 later got that number, so the running loop also holds an OS lock on
 data/sellbird.lock. The OS drops the lock when the loop dies, however it dies:
 a live PID with nobody holding the lock is not Sellbird, and is never signalled.
+
+Both files live in the current home's data folder (sellbird.workspace_home),
+which outside projects mode is the root's ``data/``, as always. In projects
+mode (sellbird.projects):
+
+- ``sellbird run`` serves every project in one process. It holds the root's
+  ``data/sellbird.lock`` and writes the root's ``data/sellbird.pid``, so "is
+  the loop running" reads the same files as before, and it also holds each
+  project's ``projects/<name>/data/sellbird.lock`` while that project runs;
+- ``sellbird run --project NAME`` holds only that project's lock and writes
+  only its PID file.
+
+So one project never runs twice, whichever way it was started, and the
+all-projects runner skips a project another process is already running.
 """
 
 import logging
@@ -18,11 +32,24 @@ import time
 from pathlib import Path
 
 from sellbird.paths import PROJECT_ROOT
+from sellbird.workspace_home import current_home
 
 logger = logging.getLogger("sellbird.pidfile")
 
+# The root's files. The current home's (a project's in projects mode) come
+# from pid_file() and lock_file().
 PID_FILE = PROJECT_ROOT / "data" / "sellbird.pid"
 LOCK_FILE = PROJECT_ROOT / "data" / "sellbird.lock"
+
+
+def pid_file() -> Path:
+    """The current home's PID file."""
+    return current_home().data_dir / "sellbird.pid"
+
+
+def lock_file() -> Path:
+    """The current home's loop lock."""
+    return current_home().data_dir / "sellbird.lock"
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
@@ -71,7 +98,7 @@ def pid_alive(pid: int) -> bool:
 
 
 def read_pid(path: Path | None = None) -> int | None:
-    path = path or PID_FILE
+    path = path or pid_file()
     try:
         return int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
@@ -80,7 +107,7 @@ def read_pid(path: Path | None = None) -> int | None:
 
 def write_pid_file(path: Path | None = None) -> None:
     """Record this process as the running loop (best effort)."""
-    path = path or PID_FILE
+    path = path or pid_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(os.getpid()), encoding="utf-8")
@@ -91,7 +118,7 @@ def write_pid_file(path: Path | None = None) -> None:
 def remove_pid_file(path: Path | None = None) -> None:
     """Remove the PID file — only if it still names this process, so a loop
     exiting late never erases a newer loop's record."""
-    path = path or PID_FILE
+    path = path or pid_file()
     if read_pid(path) == os.getpid():
         try:
             path.unlink(missing_ok=True)
@@ -130,7 +157,7 @@ def _unlock(handle) -> None:
 def hold_loop_lock(path: Path | None = None):
     """Take the loop lock for this process's lifetime, or None if another
     loop already holds it. Keep the returned handle open while running."""
-    path = path or LOCK_FILE
+    path = path or lock_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(path, "a+b")
@@ -156,7 +183,7 @@ def release_loop_lock(handle) -> None:
 
 def loop_lock_held(path: Path | None = None) -> bool:
     """True while some Sellbird loop holds the lock. Probing never keeps it."""
-    path = path or LOCK_FILE
+    path = path or lock_file()
     if not path.exists():
         return False
     try:

@@ -133,7 +133,7 @@ def cmd_run(args):
     """Start Sellbird's heartbeat loop."""
     from sellbird.main import main
 
-    main()
+    main(project=getattr(args, "project", None))
 
 
 def cmd_train(args):
@@ -1345,6 +1345,8 @@ def main():
 
     # sellbird run
     sub = subparsers.add_parser("run", help="Start Sellbird's heartbeat loop")
+    sub.add_argument("--project", metavar="NAME",
+                     help="Run just this project (projects mode; default: every project)")
     sub.set_defaults(func=cmd_run)
 
     # sellbird train <url>
