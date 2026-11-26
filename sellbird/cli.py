@@ -188,7 +188,7 @@ def cmd_mcp(args):
         sys.exit(2)
     from sellbird.mcp_server import run_stdio
 
-    run_stdio()
+    run_stdio(project=getattr(args, "project", None))
 
 
 def cmd_connect(args):
@@ -1523,6 +1523,8 @@ def main():
     sub.add_argument("--print", dest="print_config", action="store_true",
                      help="Print the config to add by hand; change nothing")
     sub.add_argument("--yes", action="store_true", help="Apply without asking")
+    sub.add_argument("--project", metavar="NAME",
+                     help="Work on this project only (an install with several)")
     sub.set_defaults(func=cmd_mcp)
 
     sub = subparsers.add_parser(

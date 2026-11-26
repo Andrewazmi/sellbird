@@ -2067,7 +2067,7 @@ async function loadOutbox() {
 
   actions.innerHTML = data.paused
     ? onlyYou() + '<button class="btn btn-primary btn-sm" onclick="sendingToggle(\'resume\')">Resume sending</button>'
-    : '<button class="btn btn-secondary btn-sm" onclick="sendingToggle(\'pause\')">Pause all sending</button>';
+    : '<button class="btn btn-secondary btn-sm" onclick="sendingToggle(\'pause\')">' + pauseLabel() + '</button>';
 
   // The kill switch gets a banner only when it's actually on — a permanent
   // bar for a thing that isn't happening is just noise.
@@ -4980,9 +4980,10 @@ function limitsHtml(d) {
     '<section class="sec span"><div class="w"><div class="row"><div class="grow"><p class="t">' +
       (paused ? 'All sending is paused' : 'Sending is on') + '</p><p class="s">' +
       (paused ? escHtml(d.paused) + '. Nothing goes out until you turn it back on. Only you can.'
-              : 'One press stops every email and text. Your agent can press it too. Only you can undo it.') + '</p></div>' +
+              : 'One press stops every email and text' + (currentProject() ? ' from this project' : '') +
+                '. Your agent can press it too. Only you can undo it.') + '</p></div>' +
       (paused ? '<button class="btn btn-primary btn-sm" onclick="limitsToggle(\'resume\')">Turn sending back on</button>'
-              : '<button class="btn btn-danger btn-sm" onclick="limitsToggle(\'pause\')">Pause all sending</button>') +
+              : '<button class="btn btn-danger btn-sm" onclick="limitsToggle(\'pause\')">' + pauseLabel() + '</button>') +
       '</div></div></section>' +
     '<section class="sec"><h2>What sends on its own</h2><div class="w">' +
       '<div class="row"><div class="grow"><p class="t">Email autopilot</p><p class="s">' +
@@ -5796,6 +5797,11 @@ async function listenForGoTo() {
 // sessionStorage and sent on every call (auth.js), so two tabs on two projects
 // stay apart; the server's cookie only remembers the last one picked, for
 // plain links.
+
+// The pause switch is each project's own: say so when there are projects.
+function pauseLabel() {
+  return currentProject() ? 'Pause sending for this project' : 'Pause all sending';
+}
 
 async function initProjects() {
   const wrap = document.getElementById('project-switch');

@@ -72,9 +72,18 @@ AGENT_ACCESS_KEY = "agent_access"   # 'off' cuts the agent off; anything else is
 
 
 async def _agent_is_off() -> bool:
-    if not _db_path().exists():
+    return await _agent_off_in(_state())
+
+
+async def _agent_off_in(state) -> bool:
+    """Whether the agent is cut off. In projects mode the switch is the
+    install's (every project shares the agent's token): off there, or off
+    in this project's own settings (from before projects), is off."""
+    if state.shared is not None and (await state.shared.get_setting(AGENT_ACCESS_KEY) or "") == "off":
+        return True
+    if not Path(state.db_path).exists():
         return False
-    return (await _state().get_setting(AGENT_ACCESS_KEY) or "") == "off"
+    return (await state.get_setting(AGENT_ACCESS_KEY) or "") == "off"
 
 
 async def _record_agent_request(method: str, path: str, status: int) -> None:
@@ -658,7 +667,7 @@ async def get_suite():
         text = texting.status(config) if config is not None else {"enabled": False, "connected": False}
         booking_url = str(getattr(getattr(getattr(config, "product", None), "offer", None), "booking_url", "") or "")
         hooks = len(getattr(config, "webhooks", []) or [])
-        agent_off = (await state.get_setting(AGENT_ACCESS_KEY) or "") == "off"
+        agent_off = await _agent_off_in(state)
         meetings = await count("SELECT COUNT(*) AS n FROM meetings")
 
         def part(name, what, st, screen, detail=""):
@@ -2441,7 +2450,13 @@ async def set_agent_access(request: Request):
         return refused
     state = _state()
     await state.init_db()
-    await state.set_setting(AGENT_ACCESS_KEY, "off" if access == "off" else "")
+    if state.shared is not None:
+        # Projects mode: one switch for the whole install.
+        await state.shared.set_setting(AGENT_ACCESS_KEY, "off" if access == "off" else "")
+        if access == "on":
+            await state.set_setting(AGENT_ACCESS_KEY, "")
+    else:
+        await state.set_setting(AGENT_ACCESS_KEY, "off" if access == "off" else "")
     signed_out = pane_sessions.sign_out_all() if access == "off" else 0
     await state.log_action("agent_access_" + access, "dashboard", {"panes_signed_out": signed_out})
     return {"success": True, "access": access, "panes_signed_out": signed_out}

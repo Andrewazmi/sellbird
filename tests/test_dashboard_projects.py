@@ -453,3 +453,41 @@ def test_the_project_comes_from_the_environment(monkeypatch):
         mcp_server.project_from_env({"SELLBIRD_PROJECT": "Bad Name\r\nX: y"})
     monkeypatch.setenv("SELLBIRD_PROJECT", "beta")
     assert mcp_server.default_client().project == "beta"
+
+
+def test_turning_the_agent_off_in_one_project_cuts_it_off_in_every_project(agent, client):
+    # One agent token serves the whole install, so its switch is the install's.
+    assert client.post("/api/agent/access", json={"access": "off"},
+                       headers={HEADER: "alpha"}).json()["access"] == "off"
+    for name in ("alpha", "beta"):
+        out, _ = _agent_call(agent, name)
+        assert out["ok"] is False and out["status"] == 403, name
+    assert client.get("/api/agent", headers={HEADER: "beta"}).json()["access"] == "off"
+    # Letting it back in from either project lets it back in everywhere.
+    assert client.post("/api/agent/access", json={"access": "on"},
+                       headers={HEADER: "beta"}).json()["access"] == "on"
+    out, _ = _agent_call(agent, "alpha")
+    assert {d["to_email"].split("-")[0] for d in out["pending"]} == {"alpha"}
+
+
+def test_a_projects_own_switch_from_before_projects_still_holds_until_turned_on(agent, client, install):
+    asyncio.run(StateManager(str(_db(install, "beta"))).set_setting(dash.AGENT_ACCESS_KEY, "off"))
+    out, _ = _agent_call(agent, "beta")
+    assert out["status"] == 403
+    out, _ = _agent_call(agent, "alpha")
+    assert out.get("ok", True) is not False
+    client.post("/api/agent/access", json={"access": "on"}, headers={HEADER: "beta"})
+    out, _ = _agent_call(agent, "beta")
+    assert {d["to_email"].split("-")[0] for d in out["pending"]} == {"beta"}
+
+
+def test_sellbird_mcp_project_pins_the_server(monkeypatch):
+    import sys
+    from sellbird import cli, mcp_server
+    seen = []
+    monkeypatch.setattr(mcp_server, "run_stdio", lambda project=None: seen.append(project))
+    monkeypatch.setattr(sys, "argv", ["sellbird", "mcp", "--project", "beta"])
+    cli.main()
+    monkeypatch.setattr(sys, "argv", ["sellbird", "mcp"])
+    cli.main()
+    assert seen == ["beta", None]

@@ -153,8 +153,11 @@ signing in once covers all projects.
 - Every module-level `DB_PATH` read in `dashboard.py` goes through
   `current_home().db_path`, which outside projects mode is the same file.
 - Starting and stopping the loop from the dashboard controls the one process.
-  Pausing a project is that project's sending mode, which already lives in its
-  config.
+  Pausing sending is the project's own (`sending_paused` in its database), so
+  with projects the button reads "Pause sending for this project".
+- The agent's on/off switch is the install's, since every project shares the
+  agent's token: it lives in `shared.db`, and the agent is off when that or
+  the project's own setting is off.
 - The MCP server sends the same header. `sellbird mcp --project NAME` pins
   it to one project.
 

@@ -11,7 +11,9 @@ It holds three things:
   cold email waits and its Writer drafts nothing for the company. A reply
   renews the claim, and it lapses on its own;
 - **inbox_sends**: one row per cold email, by inbox and project, so an
-  inbox's ``inbox_daily_cap`` counts every project's sends.
+  inbox's ``inbox_daily_cap`` counts every project's sends;
+- **settings** that are the install's, not a project's: the agent's
+  on/off switch, since every project shares the agent's token.
 
 A company is its domain as Sellbird recorded it; with none, the address
 itself, so a free-mail address never claims every business on that provider.
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS company_claims (domain TEXT PRIMARY KEY, project TEXT
 CREATE TABLE IF NOT EXISTS inbox_sends (id INTEGER PRIMARY KEY AUTOINCREMENT,
   inbox TEXT NOT NULL, project TEXT NOT NULL, sent_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_inbox_sends_inbox ON inbox_sends(inbox, sent_at);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 """
 
 _ready: set[str] = set()
@@ -83,6 +86,20 @@ class SharedState:
         finally:
             db.close()
         _ready.add(self.db_path)
+
+    # ── The install's settings ──
+
+    async def get_setting(self, key: str) -> str | None:
+        async with self._connect() as db:
+            async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cursor:
+                row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def set_setting(self, key: str, value: str) -> None:
+        async with self._connect() as db:
+            await db.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                             "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+            await db.commit()
 
     # ── Suppressions (keys normalised by StateManager.suppression_key) ──
 
