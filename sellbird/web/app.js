@@ -502,8 +502,7 @@ function unlockWithToken(event) {
     return;
   }
   hideLock();
-  loadCurrentTab();
-  loadSellbirdStatus();
+  initProjects().then(() => { loadCurrentTab(); loadSellbirdStatus(); });
 }
 
 // Downloads go through the same authorised fetch and are handed to the
@@ -1831,12 +1830,17 @@ async function loadSellbirdStatus() {
   label.textContent = running ? 'Running' : 'Stopped';
 
   const meta = document.getElementById('control-meta');
+  // With projects there is one loop for all of them; say so, and when it is
+  // running but skipping this project (its settings didn't load).
+  const scope = !data.project ? '' : !running ? ' One loop runs every project.'
+    : data.project_running ? ' &middot; runs every project'
+    : ' &middot; not running ' + escHtml(data.project) + ' (check its settings)';
   if (running && data.pid) {
     let info = 'PID ' + escHtml(String(data.pid));
     if (data.started_at) info += ' &middot; started ' + formatDate(data.started_at);
-    meta.innerHTML = info;
+    meta.innerHTML = info + scope;
   } else {
-    meta.innerHTML = 'Sellbird wakes every few minutes, does what needs doing, and sleeps.';
+    meta.innerHTML = 'Sellbird wakes every few minutes, does what needs doing, and sleeps.' + scope;
   }
 
   document.getElementById('btn-start').style.display = running ? 'none' : '';
@@ -5786,12 +5790,58 @@ async function listenForGoTo() {
 
 // ── Init & live refresh ──
 
-document.body.classList.add('first-load');
-showTab(fromHash(), {fromHash: true, focus: false, initial: true});
-setTimeout(() => document.body.classList.remove('first-load'), 700);
-loadSellbirdStatus();
-loadAgentReport();
-listenForGoTo();
+// ── Projects: one dashboard, several objectives (docs/projects.md) ──
+//
+// Shown only when the install has projects. This tab's project is kept in
+// sessionStorage and sent on every call (auth.js), so two tabs on two projects
+// stay apart; the server's cookie only remembers the last one picked, for
+// plain links.
+
+async function initProjects() {
+  const wrap = document.getElementById('project-switch');
+  const data = await api('/api/projects');
+  if (!data) return;   // locked or offline: ask again once there is an answer
+  if (!Array.isArray(data.projects) || !data.projects.length) {
+    setCurrentProject('');
+    wrap.hidden = true;
+    return;
+  }
+  // The server's answer wins: a name this tab kept that is gone falls back to the default.
+  const current = data.projects.includes(data.current) ? data.current : (data.default || data.projects[0]);
+  setCurrentProject(current);
+  const select = document.getElementById('project-select');
+  const loops = data.loops || {};
+  select.innerHTML = data.projects.map(name =>
+    '<option value="' + escHtml(name) + '"' + (name === current ? ' selected' : '') + '>' +
+    escHtml(name) + (loops[name] ? ' \u00b7 running' : '') + '</option>').join('');
+  wrap.hidden = false;
+  document.title = 'Sellbird \u00b7 ' + current;
+}
+
+async function switchProject(name) {
+  if (!name || name === currentProject()) return;
+  setCurrentProject(name);
+  // Plain links and other tools follow the last choice.
+  try {
+    await authFetch('/api/projects/select', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({project: name})});
+  } catch { /* this tab's header is what counts */ }
+  // Every view starts over on the new project: nothing from the last one stays
+  // on screen, in a poll or in a form. A record of the old project would be
+  // a 404 in the new one, so the page reopens on its tab, not on a record.
+  history.replaceState(null, '', '#' + (currentTab || 'today'));
+  location.reload();
+}
+
+(async function start() {
+  await initProjects();
+  document.body.classList.add('first-load');
+  showTab(fromHash(), {fromHash: true, focus: false, initial: true});
+  setTimeout(() => document.body.classList.remove('first-load'), 700);
+  loadSellbirdStatus();
+  loadAgentReport();
+  listenForGoTo();
+})();
 // The agent chip and the answer lines: what the agent did, kept fresh.
 setInterval(() => { if (!document.hidden && !_locked) loadAgentReport(); }, 30000);
 

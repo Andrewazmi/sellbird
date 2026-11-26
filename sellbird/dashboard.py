@@ -39,7 +39,8 @@ from sellbird.paths import PACKAGE_ROOT, PROJECT_ROOT, is_checkout  # noqa: E402
 from sellbird import storage  # noqa: E402
 from sellbird.pidfile import LOCK_FILE, loop_lock_held, pid_alive  # noqa: E402
 from sellbird.textio import read_user_text  # noqa: E402
-from sellbird.workspace_home import NotOnHosted, require_self_hosted, use_home  # noqa: E402
+from sellbird import projects  # noqa: E402
+from sellbird.workspace_home import NotOnHosted, current_home, require_self_hosted, use_home  # noqa: E402
 DB_PATH = PROJECT_ROOT / "data" / "sellbird.db"
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "sellbird.yaml"
@@ -71,7 +72,7 @@ AGENT_ACCESS_KEY = "agent_access"   # 'off' cuts the agent off; anything else is
 
 
 async def _agent_is_off() -> bool:
-    if not DB_PATH.exists():
+    if not _db_path().exists():
         return False
     return (await _state().get_setting(AGENT_ACCESS_KEY) or "") == "off"
 
@@ -82,8 +83,90 @@ async def _record_agent_request(method: str, path: str, status: int) -> None:
     await state.log_agent_request(method, path, status)
 
 
+def _db_path() -> Path:
+    """The database of the request's home: its project's in projects mode,
+    and otherwise ``DB_PATH`` (the default home reads it, so a patched
+    ``DB_PATH`` still applies)."""
+    return Path(current_home().db_path)
+
+
+# ── Projects (sellbird.projects, docs/projects.md) ──
+
+PROJECT_HEADER = "x-sellbird-project"
+PROJECT_COOKIE = "sellbird_project"
+UNKNOWN_PROJECT_KEY = "sellbird.unknown_project"
+# Not about one project's data: they run in the project asked for, or the
+# default one when that name is unknown, so the page can always load and
+# find out which projects exist.
+_PROJECT_FREE_PATHS = ("/", "/api/projects", "/api/projects/select", "/api/instance")
+
+
+def _install_root() -> Path:
+    return Path(PROJECT_ROOT)
+
+
+def _requested_project(headers: list[tuple[bytes, bytes]]) -> str:
+    """The project a request names: the header, else the cookie. "" for none."""
+    cookie = ""
+    for key, value in headers:
+        name = key.decode("latin-1").lower()
+        if name == PROJECT_HEADER:
+            asked = value.decode("latin-1").strip()
+            if asked:
+                return asked
+        elif name == "cookie":
+            for part in value.decode("latin-1").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == PROJECT_COOKIE and v.strip():
+                    cookie = v.strip()
+    return cookie
+
+
+def _project_for_request(scope) -> tuple[object | None, str | None]:
+    """(home, unknown name) for a request in projects mode; (None, None)
+    outside it. An unknown name still gets the default project's home, so
+    nothing before ``UnknownProjectGate`` can touch another project's data
+    or create a file; the gate answers 404."""
+    root = _install_root()
+    names = projects.discover(root)
+    if not names:
+        return None, None
+    asked = _requested_project(scope.get("headers") or [])
+    wanted = asked or projects.default_project(root)
+    try:
+        return projects.project_home(root, wanted), None
+    except projects.UnknownProject:
+        pass
+    return projects.project_home(root, projects.default_project(root)), wanted
+
+
 # Innermost first: the guard (added next) sets the principal before this runs.
 app.add_middleware(agent_policy.AgentPolicy, is_off=_agent_is_off, record=_record_agent_request)
+
+
+class UnknownProjectGate:
+    """Inside the guard, so only a signed-in caller learns whether a project
+    exists: a request for a project that isn't there gets a 404, never another
+    project's data (see ``home_middleware``)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        unknown = scope.get(UNKNOWN_PROJECT_KEY)
+        if scope["type"] != "http" or not unknown or scope["path"] in _PROJECT_FREE_PATHS \
+                or scope["path"].startswith("/static/"):
+            return await self.app(scope, receive, send)
+        body = json.dumps({"error": "unknown_project",
+                           "message": f"There is no project called {unknown[:60]!r} in this install."}).encode()
+        await send({"type": "http.response.start", "status": 404,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode()),
+                                (b"cache-control", b"no-store")]})
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(UnknownProjectGate)
 app.add_middleware(auth.DashboardGuard, store=token_store, agent_store=agent_token_store, panes=pane_sessions)
 
 
@@ -93,7 +176,12 @@ class home_middleware:
     Pure ASGI, so the ContextVar set here is seen by everything inside it:
     the guard, async handlers and the sync handlers Starlette runs in its
     threadpool. An app with no ``state.home`` sets nothing, and the default
-    home (the module globals) applies, which is every self-hosted install."""
+    home (the module globals) applies, which is every self-hosted install.
+
+    In projects mode (a ``projects/`` folder under the install's root) the
+    home is the request's project: the ``X-Sellbird-Project`` header, else the
+    ``sellbird_project`` cookie, else the default project. The header is what
+    lets two tabs work on two projects at once."""
 
     def __init__(self, app):
         self.app = app
@@ -102,6 +190,10 @@ class home_middleware:
         home = None
         if scope["type"] in ("http", "websocket"):
             home = getattr(getattr(scope.get("app"), "state", None), "home", None)
+            if home is None and scope["type"] == "http":
+                home, unknown = _project_for_request(scope)
+                if unknown:
+                    scope[UNKNOWN_PROJECT_KEY] = unknown
         if home is None:
             await self.app(scope, receive, send)
             return
@@ -116,6 +208,42 @@ app.add_middleware(home_middleware)
 @app.exception_handler(NotOnHosted)
 async def _not_on_hosted(request: Request, exc: NotOnHosted):
     return JSONResponse(exc.payload, status_code=409)
+
+@app.get("/api/projects")
+async def get_projects():
+    """The projects in this install, which one opens first, and which one this
+    request is for. Outside projects mode the list is empty and the page shows
+    nothing new. ``loops`` says which projects have a loop running now."""
+    root = _install_root()
+    names = projects.discover(root)
+    if not names:
+        return {"projects": [], "default": None, "current": None, "loops": {}}
+    current = current_home().project
+    # A name this request asked for that isn't a project falls back to the
+    # default here (see _PROJECT_FREE_PATHS), so the page can recover.
+    return {"projects": names, "default": projects.default_project(root), "current": current,
+            "loops": {n: _loop_running(n) for n in names}}
+
+
+@app.post("/api/projects/select")
+async def select_project(request: Request):
+    """Remember a project for requests that don't name one (``X-Sellbird-Project``
+    is what the page sends; this cookie is for plain links and other tools)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = str(body.get("project") or "") if isinstance(body, dict) else ""
+    try:
+        projects.project_home(_install_root(), name)
+    except projects.UnknownProject:
+        return JSONResponse({"error": "unknown_project",
+                             "message": f"There is no project called {name[:60]!r} in this install."},
+                            status_code=404)
+    response = JSONResponse({"success": True, "project": name})
+    response.set_cookie(PROJECT_COOKIE, name, path="/", httponly=True, samesite="strict")
+    return response
+
 
 # Sellbird process tracking
 _sellbird_process: subprocess.Popen | None = None
@@ -132,10 +260,11 @@ async def query_db(sql: str, params: tuple = ()) -> list[dict]:
     Never raises: a missing DB file, missing table, or malformed schema
     returns [] so no dashboard route can 500 on an empty install.
     """
-    if not DB_PATH.exists():
+    db_path = _db_path()
+    if not db_path.exists():
         return []
     try:
-        async with storage.connect(str(DB_PATH)) as db:
+        async with storage.connect(str(db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
@@ -221,26 +350,60 @@ def _write_env_file(updates: dict[str, str]):
     load_dotenv(str(ENV_FILE), override=True)
 
 
-def _check_sellbird_pid() -> int | None:
-    """Check if there's a running Sellbird process from a PID file."""
-    global _sellbird_process, _sellbird_started_at
-    if _sellbird_process and _sellbird_process.poll() is None:
-        return _sellbird_process.pid
-    if PID_FILE.exists():
+def _live_pid(pid_file: Path, lock_file: Path) -> int | None:
+    """The PID in ``pid_file`` while a loop holds ``lock_file``; a stale file
+    is removed."""
+    if pid_file.exists():
         try:
-            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             pid = None
         # pid_alive, never os.kill(pid, 0): on Windows that terminates the loop.
         # And only while a loop holds the lock: after a crash or a reboot the
         # PID can belong to an unrelated program, which Stop must not signal.
-        if pid is not None and pid_alive(pid) and loop_lock_held(LOCK_FILE):
+        if pid is not None and pid_alive(pid) and loop_lock_held(lock_file):
             return pid
         try:
-            PID_FILE.unlink(missing_ok=True)
+            pid_file.unlink(missing_ok=True)
         except OSError:
             pass
     return None
+
+
+def _project_loop_files(name: str | None = None) -> tuple[Path, Path] | None:
+    """The PID and lock files of one project's own loop (``sellbird run
+    --project``), which the all-projects loop holds too while it runs that
+    project. None outside projects mode."""
+    name = name or current_home().project
+    if not name:
+        return None
+    data = _install_root() / "projects" / name / "data"
+    return data / "sellbird.pid", data / "sellbird.lock"
+
+
+def _check_sellbird_pid() -> int | None:
+    """The PID of the loop that runs this request's project, or None. In
+    projects mode ``sellbird run`` is one process for every project and
+    keeps the root's PID file and lock, the same files as outside projects
+    mode; a loop started for this project alone (``sellbird run --project``)
+    has the project's own."""
+    global _sellbird_process, _sellbird_started_at
+    if _sellbird_process and _sellbird_process.poll() is None:
+        return _sellbird_process.pid
+    pid = _live_pid(PID_FILE, LOCK_FILE)
+    if pid is not None:
+        return pid
+    files = _project_loop_files()
+    return _live_pid(*files) if files else None
+
+
+def _loop_running(name: str) -> bool:
+    """Whether a loop is running project ``name`` right now. A loop holds a
+    project's own lock while it runs that project, whether it is the
+    all-projects loop or one started for the project alone, so a project the
+    all-projects loop skipped (a config that wouldn't load) reads as stopped."""
+    files = _project_loop_files(name)
+    return bool(files and loop_lock_held(files[1]))
 
 
 # ── Setup Status ──
@@ -348,7 +511,11 @@ async def get_setup_status():
     })
 
     # 6. Product trained
-    product_trained = (PROJECT_ROOT / "skills" / "product_knowledge.md").exists()
+    # In projects mode a project's own skills folder first, then the install's.
+    skill_dirs = [PROJECT_ROOT / "skills"]
+    if current_home().project:
+        skill_dirs.insert(0, Path(current_home().skills_dir))
+    product_trained = any((d / "product_knowledge.md").exists() for d in skill_dirs)
     checks.append({
         "id": "product_trained", "label": "Teach Sellbird your product",
         "done": product_trained,
@@ -794,6 +961,10 @@ def _offer_config_file() -> Path:
     untrained: your offer goes in the gitignored sellbird.local.yaml, which
     then holds your whole config (as `sellbird train` does)."""
     target = _resolve_config_file()
+    if current_home().project:
+        # A project's sellbird.yaml is its own, the only file it reads (never
+        # a tracked template), so the offer goes there.
+        return target
     if target.name == "sellbird.yaml":
         local = target.with_name("sellbird.local.yaml")
         if not local.exists():
@@ -887,7 +1058,14 @@ async def get_company():
         await state.init_db()
         raw = await state.get_setting(PROPOSED_KEY)
         proposed = json.loads(raw) if raw else None
-        return company_view(load_config(), PROJECT_ROOT, proposed)
+        view = company_view(load_config(), current_home().root if current_home().project
+                            else PROJECT_ROOT, proposed)
+        if current_home().project:
+            # What training wrote is the project's own, else the install's.
+            shared = company_view(load_config(), PROJECT_ROOT, proposed)
+            for key in ("knowledge", "competitors"):
+                view[key] = view[key] or shared[key]
+        return view
     except Exception as e:
         return JSONResponse({"error": f"Couldn't read your config: {e}"}, status_code=500)
 
@@ -1063,8 +1241,9 @@ async def add_feedback(request: Request):
         return {"success": False, "message": "Comment is required."}
     feedback_id = uuid.uuid4().hex[:12]
     try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        async with storage.connect(str(DB_PATH)) as db:
+        db_path = _db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with storage.connect(str(db_path)) as db:
             # Ensure the table exists so feedback works even on a fresh install
             await db.execute(
                 """CREATE TABLE IF NOT EXISTS feedback (
@@ -1110,8 +1289,14 @@ async def get_sellbird_status():
         paused = await state.get_setting("sending_paused") or ""
     except Exception:
         paused = ""
-    return {"running": pid is not None, "pid": pid, "started_at": started,
-            "sending_paused": paused}
+    status = {"running": pid is not None, "pid": pid, "started_at": started,
+              "sending_paused": paused}
+    if current_home().project:
+        # One loop serves every project: Start and Stop act on it, and this
+        # says whether it is running this project.
+        status["project"] = current_home().project
+        status["project_running"] = _loop_running(current_home().project)
+    return status
 
 
 @app.post("/api/sellbird/start")
@@ -1121,8 +1306,14 @@ async def start_sellbird():
 
     if _check_sellbird_pid():
         return {"success": False, "message": "Sellbird is already running."}
-    from sellbird.main import _needs_setup
-    if _needs_setup():
+    if current_home().project:
+        # One loop for every project, which skips a project whose settings
+        # don't load: don't refuse it because this tab's project isn't set up.
+        needs_setup = not ENV_FILE.exists()
+    else:
+        from sellbird.main import _needs_setup
+        needs_setup = _needs_setup()
+    if needs_setup:
         return {"success": False,
                 "message": "Sellbird isn't set up yet. Run `sellbird setup` in a terminal first."}
 
@@ -1205,6 +1396,13 @@ async def stop_sellbird():
     _sellbird_process = None
     _sellbird_started_at = None
     PID_FILE.unlink(missing_ok=True)
+    files = _project_loop_files()
+    if files is not None:
+        try:
+            if int(files[0].read_text(encoding="utf-8").strip()) == pid:
+                files[0].unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
 
     return {"success": True}
 
@@ -2036,7 +2234,7 @@ async def get_suppressions():
         state = _state()
         await state.init_db()
         rows = await state.list_suppressions(limit=SUPPRESSIONS_SHOWN)
-        counts = await query_db("SELECT reason, COUNT(*) AS n FROM suppressions GROUP BY reason")
+        counts = await _suppression_counts(state)
         return {"rows": rows, "counts": {r["reason"]: r["n"] for r in counts},
                 "total": sum(r["n"] for r in counts), "shown": SUPPRESSIONS_SHOWN}
     except Exception as e:
@@ -2044,6 +2242,23 @@ async def get_suppressions():
 
 
 SUPPRESSIONS_SHOWN = 500
+
+
+async def _suppression_counts(state) -> list[dict]:
+    """How many people are suppressed, by reason. In projects mode an opt-out
+    in any project stops every project, so the shared list counts too (a
+    person on both lists once)."""
+    if state.shared is None:
+        return await query_db("SELECT reason, COUNT(*) AS n FROM suppressions GROUP BY reason")
+    own = await query_db("SELECT kind, value, reason FROM suppressions")
+    seen: dict[tuple, str] = {(r["kind"], r["value"]): r["reason"] for r in own}
+    # The shared list wins where both name someone.
+    for r in await state.shared.list_suppressions(limit=2_000_000_000):
+        seen[(r["kind"], r["value"])] = r["reason"]
+    tally: dict[str, int] = {}
+    for reason in seen.values():
+        tally[reason] = tally.get(reason, 0) + 1
+    return [{"reason": k, "n": v} for k, v in tally.items()]
 
 
 @app.post("/api/suppressions")
@@ -2682,7 +2897,7 @@ async def record_prospect_meeting(prospect_id: str, request: Request):
 
 def _state():
     from sellbird.state import StateManager
-    return StateManager(db_path=str(DB_PATH))
+    return StateManager(db_path=str(_db_path()))
 
 
 # What a reviewer needs next to a draft to check its claims against the facts.
@@ -2977,10 +3192,11 @@ def _extra_inboxes_connected() -> bool:
     """Whether an inbox besides the main one is connected (sellbird inboxes):
     Sellbird sends from it even while the main mailbox isn't signed in."""
     import sqlite3
-    if not Path(DB_PATH).exists():
+    db_path = _db_path()
+    if not db_path.exists():
         return False
     try:
-        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as db:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
             row = db.execute("SELECT 1 FROM mailboxes WHERE state != 'retired' LIMIT 1").fetchone()
     except sqlite3.Error:
         return False   # no table yet: no extra inbox
@@ -3179,7 +3395,7 @@ async def export_prospects(all: bool = False, min_score: int = 0, email_status: 
     from sellbird.state import StateManager
     from sellbird.export import export_prospects_csv
 
-    state = StateManager(db_path=str(DB_PATH))
+    state = StateManager(db_path=str(_db_path()))
     try:
         await state.init_db()
         statuses = [s.strip() for s in email_status.split(",") if s.strip()] or None
@@ -3716,9 +3932,20 @@ async def get_activity():
 # This is the only stage that spends money, so the UI never starts one without
 # showing what it will cost first.
 
-_discovery_task: asyncio.Task | None = None
-_discovery_report: dict | None = None
-_discovery_kind = "discover"   # or "profile": reading sites has no stop switch
+# One run's state per project (None outside projects mode), so a run in one
+# project is never shown, reported or blocked in another. "kind" is "discover"
+# or "profile": reading sites has no stop switch.
+_discovery_runs: dict[str | None, dict] = {}
+
+
+def _discovery() -> dict:
+    return _discovery_runs.setdefault(current_home().project, {
+        "task": None, "report": None, "kind": "discover"})
+
+
+def _discovery_running() -> bool:
+    task = _discovery()["task"]
+    return bool(task and not task.done())
 
 
 def _discovery_queries(body: dict, config):
@@ -3751,10 +3978,10 @@ async def get_discovery_providers():
             "default": DEFAULT_PROVIDER,
             "selected": await state.get_setting("discovery_provider") or DEFAULT_PROVIDER,
             "paused": await state.get_setting("discovery_paused"),
-            "running": bool(_discovery_task and not _discovery_task.done()),
-            "running_kind": _discovery_kind,
+            "running": _discovery_running(),
+            "running_kind": _discovery()["kind"],
             "unprofiled": await state.count_companies_needing_profile(),
-            "last_report": _discovery_report,
+            "last_report": _discovery()["report"],
         }
     except Exception as e:
         logger.exception("discovery providers failed")
@@ -3796,9 +4023,8 @@ async def start_discovery(request: Request):
     Discovery takes minutes, not milliseconds — holding the request open
     would just time out. Progress shows up in the run log.
     """
-    global _discovery_task, _discovery_report
-
-    if _discovery_task and not _discovery_task.done():
+    run = _discovery()
+    if _discovery_running():
         return JSONResponse({"success": False, "message": "a run is already going"},
                             status_code=409)
     try:
@@ -3825,17 +4051,15 @@ async def start_discovery(request: Request):
         await state.set_setting("discovery_provider", provider)
         await state.set_setting("discovery_paused", "")
 
-        global _discovery_kind
-        _discovery_kind = "discover"
+        run["kind"] = "discover"
 
         async def _go():
-            global _discovery_report
             try:
                 # Discovery chains straight into profiling: reading the sites
                 # is free, and it is what makes the results worth anything.
                 result = await run_prospecting(state, config, provider, queries,
                                                max_spend=max_spend)
-                _discovery_report = {
+                run["report"] = {
                     **(result.discover or {}),
                     "profiled_companies": result.profiled_companies,
                     "profile_observations": result.profile_observations,
@@ -3843,10 +4067,10 @@ async def start_discovery(request: Request):
                 }
             except Exception as exc:
                 logger.exception("discovery run failed")
-                _discovery_report = {"errors": [str(exc)], "stopped": "failed"}
+                run["report"] = {"errors": [str(exc)], "stopped": "failed"}
 
-        _discovery_report = None
-        _discovery_task = asyncio.create_task(_go())
+        run["report"] = None
+        run["task"] = asyncio.create_task(_go())
         return {"success": True, "queries": len(queries)}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
@@ -3858,9 +4082,8 @@ async def start_profile():
 
     Free and model-free, so there is nothing to estimate and no cap to set.
     """
-    global _discovery_task, _discovery_report
-
-    if _discovery_task and not _discovery_task.done():
+    run = _discovery()
+    if _discovery_running():
         return JSONResponse({"success": False, "message": "a run is already going"},
                             status_code=409)
     try:
@@ -3873,7 +4096,6 @@ async def start_profile():
             return {"success": True, "pending": 0}
 
         async def _go():
-            global _discovery_report
             try:
                 try:
                     from sellbird.config import load_config
@@ -3882,18 +4104,17 @@ async def start_profile():
                     config = None   # still profiles; no role is singled out
                 companies, observations, _ = await run_profile_stage(
                     state, limit=200, config=config)
-                _discovery_report = {
+                run["report"] = {
                     "profiled_companies": companies,
                     "profile_observations": observations,
                 }
             except Exception as exc:
                 logger.exception("profile run failed")
-                _discovery_report = {"errors": [str(exc)], "stopped": "failed"}
+                run["report"] = {"errors": [str(exc)], "stopped": "failed"}
 
-        global _discovery_kind
-        _discovery_kind = "profile"
-        _discovery_report = None
-        _discovery_task = asyncio.create_task(_go())
+        run["kind"] = "profile"
+        run["report"] = None
+        run["task"] = asyncio.create_task(_go())
         return {"success": True, "pending": pending}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)

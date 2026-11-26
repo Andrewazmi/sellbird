@@ -1487,6 +1487,9 @@ body { font-size: 14px; line-height: 20px; background: var(--paper); }
   transition-property: background-color, scale; transition-duration: 150ms; transition-timing-function: ease-out;
   -webkit-tap-highlight-color: transparent;
 }
+.projswitch[hidden] { display: none; }
+.projswitch select { max-width: 180px; }
+@container app (max-width: 560px) { .projswitch select { max-width: 120px; } }
 .agentchip b { color: var(--fg); font-weight: 550; }
 .agentchip .lbl { overflow: hidden; text-overflow: ellipsis; }
 .agentchip .dot-live { width: 8px; height: 8px; border-radius: 999px; flex: none; background: var(--fg3); box-shadow: 0 0 0 3px var(--subtle); }
