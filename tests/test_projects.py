@@ -137,3 +137,38 @@ def test_default_project(tmp_path):
     assert default_project(tmp_path) == "segment-b"
     (tmp_path / "sellbird.projects.yaml").write_text("default: gone\n", encoding="utf-8")
     assert default_project(tmp_path) == "product-a"
+
+
+# ── Prompts, skills and email rules: the project's, then the root's, then shipped ──
+
+def test_knowledge_resolves_per_file(tmp_path):
+    from sellbird.brain import _read_knowledge
+    from sellbird.home import bundled_defaults
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "writer.md").write_text("root writer", encoding="utf-8")
+    own = tmp_path / "projects" / "product-a" / "prompts"
+    with use_home(Home.for_project(tmp_path, "product-a")):
+        assert _read_knowledge("prompts", "writer") == "root writer"
+        own.mkdir(parents=True)
+        (own / "writer.md").write_text("project writer", encoding="utf-8")
+        assert _read_knowledge("prompts", "writer") == "project writer"
+        shipped = (bundled_defaults() / "prompts" / "handler.md").read_text(encoding="utf-8")
+        assert _read_knowledge("prompts", "handler") == shipped
+        with pytest.raises(FileNotFoundError):
+            _read_knowledge("prompts", "no-such-prompt")
+    with use_home(Home.for_root(tmp_path)):
+        assert _read_knowledge("prompts", "writer") == "root writer"
+
+
+def test_email_rules_resolve_per_file(tmp_path):
+    from types import SimpleNamespace
+    from sellbird.config import load_email_rules
+    config = SimpleNamespace(writer=SimpleNamespace(email_rules="skills/email_rules.md"))
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "email_rules.md").write_text("root rules", encoding="utf-8")
+    with use_home(Home.for_project(tmp_path, "product-a")):
+        assert load_email_rules(config) == "root rules"
+        own = tmp_path / "projects" / "product-a" / "skills"
+        own.mkdir(parents=True)
+        (own / "email_rules.md").write_text("project rules", encoding="utf-8")
+        assert load_email_rules(config) == "project rules"

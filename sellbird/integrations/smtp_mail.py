@@ -10,7 +10,10 @@ a Google Workspace account with an app password, or self-hosted mail.
     SMTP_PASSWORD=        IMAP_PASSWORD=   (defaults to SMTP_PASSWORD)
 
 Sends as the configured persona (name + email). IMAP polling fetches
-UNSEEN inbox messages and marks them seen after retrieval.
+UNSEEN inbox messages and marks them seen after retrieval. In projects mode
+(sellbird.projects) every project reads the same inbox, so it reads without
+marking: a reply one project reads stays there for the project it's to, and
+each project skips what it already handled.
 """
 
 import asyncio
@@ -158,8 +161,11 @@ class SmtpImapProvider(MailProvider):
             if status != "OK":
                 return []
             ids = data[0].split()[-limit:]
+            from sellbird.workspace_home import _HOME
+            home = _HOME.get()
+            what = "(BODY.PEEK[])" if home is not None and home.shared_dir is not None else "(RFC822)"
             for msg_id in ids:
-                status, parts = conn.fetch(msg_id, "(RFC822)")
+                status, parts = conn.fetch(msg_id, what)
                 if status != "OK" or not parts or not isinstance(parts[0], tuple):
                     continue
                 parsed = self._parse_rfc822(parts[0][1])

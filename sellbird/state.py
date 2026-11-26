@@ -2409,8 +2409,10 @@ class StateManager:
     async def list_suppressions(self, limit: int = 200, offset: int = 0) -> list[dict]:
         if self.shared is not None:
             # Projects mode: the shared list, and what this project had before.
-            rows = (await self._own_suppressions(limit + offset, 0)
-                    + await self.shared.list_suppressions(limit + offset))
+            rows = {r["id"]: r for r in await self._own_suppressions(limit + offset, 0)}
+            # `projects init` copied the install's own rows, ids and all.
+            rows.update({r["id"]: r for r in await self.shared.list_suppressions(limit + offset)})
+            rows = list(rows.values())
             rows.sort(key=lambda r: (str(r.get("created_at") or ""), r["id"]), reverse=True)
             return rows[offset:offset + limit]
         return await self._own_suppressions(limit, offset)

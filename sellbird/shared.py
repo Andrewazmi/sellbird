@@ -18,6 +18,7 @@ itself, so a free-mail address never claims every business on that provider.
 """
 
 import logging
+import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -71,11 +72,16 @@ class SharedState:
             yield db
 
     async def init_db(self) -> None:
+        # Done without awaiting, so tasks opening the file at once never
+        # interleave here: switching a new file to WAL needs it to themselves.
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        async with storage.connect(self.db_path, timeout=BUSY_TIMEOUT_SECONDS) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.executescript(SCHEMA)
-            await db.commit()
+        db = sqlite3.connect(self.db_path, timeout=BUSY_TIMEOUT_SECONDS)
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript(SCHEMA)
+            db.commit()
+        finally:
+            db.close()
         _ready.add(self.db_path)
 
     # ── Suppressions (keys normalised by StateManager.suppression_key) ──

@@ -936,7 +936,7 @@ class Sender:
         if self.state.shared is not None:
             from sellbird.projects import install_root, live_settings
             shared_cap = live_settings(install_root()).inbox_daily_cap
-        main_address = identity_from_config(self.config).address
+        main_address = identity_from_config(self.config).address if self.state.shared is not None else ""
 
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         # In quiet hours only cold email can go, so only cold email is
