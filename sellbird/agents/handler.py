@@ -30,6 +30,7 @@ from sellbird.integrations.mail_provider import (
 )
 from sellbird.models.conversation import Conversation, Message
 from sellbird.send_window import recipient_zone
+from sellbird.shared import renew_claim
 from sellbird.state import COLLEAGUE_REPLIED, REVIEW_NEXT_REPLY_KEY, StateManager
 from sellbird.sending_mode import sync_sending_mode
 from sellbird.startups import startup_facts
@@ -872,6 +873,10 @@ class Handler:
         # Update prospect status + stop-on-reply: a human answered, so every
         # queued sequence email for them is now wrong to send.
         await self.state.update_prospect_status(prospect.id, "replied")
+        try:
+            await renew_claim(self.state, prospect)   # projects mode: keep the company
+        except Exception as e:
+            logger.warning(f"Handler: couldn't renew the company claim: {type(e).__name__}")
         try:
             cancelled = await self.state.cancel_pending_outbox_for_prospect(prospect.id)
             if cancelled:

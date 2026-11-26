@@ -114,8 +114,11 @@ RECHECK_PREFIX = "Precleared couldn't check this address; trying again after "
 # fact it couldn't establish): moved back and asked again then, with what
 # would settle it (sender: _retry_later).
 UNKNOWN_HOLD_PREFIX = "Precleared couldn't settle this address; trying again after "
-# Both notes mean "moved back by the check", and are cleared the same way.
-MOVED_BACK_PREFIXES = (RECHECK_PREFIX, UNKNOWN_HOLD_PREFIX)
+# Projects mode (sellbird.shared): another project is in touch with this
+# company, so the cold email was moved back and is tried again then.
+CLAIM_HOLD_PREFIX = "Another project is in touch with this company; trying again after "
+# These notes mean "moved back", and are cleared the same way.
+MOVED_BACK_PREFIXES = (RECHECK_PREFIX, UNKNOWN_HOLD_PREFIX, CLAIM_HOLD_PREFIX)
 # Outbox errors starting with this: the send was cut off and the email may
 # have reached them. Never retried, and counted as Sellbird's mail, so the
 # dashboard never offers a second one by hand.
@@ -716,13 +719,20 @@ _CONVERSATION_COLUMNS = frozenset({
 
 class StateManager:
     def __init__(self, db_path: str | None = None):
+        from sellbird.workspace_home import _HOME
+        home = _HOME.get()
         if not db_path:
             # A bare StateManager() inside a home uses that home's database,
             # never the process default (a server's other workspaces).
-            from sellbird.workspace_home import _HOME
-            home = _HOME.get()
             db_path = str(home.db_path) if home is not None else str(DB_PATH)
         self.db_path = db_path
+        # Projects mode (sellbird.projects): this project's name, and the
+        # layer every project shares. None otherwise, and nothing changes.
+        self.project = home.project if home is not None else None
+        self.shared = None
+        if home is not None and home.shared_dir is not None:
+            from sellbird.shared import SharedState
+            self.shared = SharedState(home.shared_dir)
 
     @asynccontextmanager
     async def _connect(self):
@@ -1765,6 +1775,8 @@ class StateManager:
                 await db.execute(
                     "DELETE FROM suppressions WHERE kind = 'address' AND value = ? "
                     "AND reason = 'opted_out'", (self.suppression_key("address", row[0]),))
+                if self.shared is not None:
+                    await self.shared.lift_opt_out(self.suppression_key("address", row[0]))
             await db.execute(
                 """INSERT INTO settings (key, value, updated_at)
                    VALUES (?, '1', CURRENT_TIMESTAMP)
@@ -2347,6 +2359,9 @@ class StateManager:
         key = self.suppression_key(kind, value)
         if not key or (kind == "address" and "@" not in key):
             raise ValueError("not an address or domain")  # also a domain that normalises to nothing
+        if self.shared is not None:
+            # Projects mode: an opt-out from one project's email stops them all.
+            return await self.shared.add_suppression(kind, key, reason, source)
         async with self._connect() as db:
             cursor = await db.execute(
                 "INSERT OR IGNORE INTO suppressions (id, kind, value, reason, source) VALUES (?, ?, ?, ?, ?)",
@@ -2377,6 +2392,8 @@ class StateManager:
                                       params) as cursor:
                     for kind, value, reason in await cursor.fetchall():
                         found[(kind, value)] = reason
+        if self.shared is not None:
+            found.update(await self.shared.suppression_reasons(keys))
         out = {}
         for e in wanted:
             reason = found.get(("address", e)) or next(
@@ -2390,6 +2407,15 @@ class StateManager:
         return (await self.suppressed_among([email])).get(_norm(email))
 
     async def list_suppressions(self, limit: int = 200, offset: int = 0) -> list[dict]:
+        if self.shared is not None:
+            # Projects mode: the shared list, and what this project had before.
+            rows = (await self._own_suppressions(limit + offset, 0)
+                    + await self.shared.list_suppressions(limit + offset))
+            rows.sort(key=lambda r: (str(r.get("created_at") or ""), r["id"]), reverse=True)
+            return rows[offset:offset + limit]
+        return await self._own_suppressions(limit, offset)
+
+    async def _own_suppressions(self, limit: int, offset: int) -> list[dict]:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -2401,7 +2427,10 @@ class StateManager:
         async with self._connect() as db:
             cursor = await db.execute("DELETE FROM suppressions WHERE id = ?", (suppression_id,))
             await db.commit()
-            return cursor.rowcount > 0
+            removed = cursor.rowcount > 0
+        if self.shared is not None and await self.shared.remove_suppression(suppression_id):
+            removed = True
+        return removed
 
 
     async def colleague_who_replied(self, prospect_id: str) -> str | None:
