@@ -188,7 +188,11 @@ def cmd_mcp(args):
         sys.exit(2)
     from sellbird.mcp_server import run_stdio
 
-    run_stdio(project=getattr(args, "project", None))
+    project = getattr(args, "project", None)
+    if project:
+        run_stdio(project=project)
+    else:
+        run_stdio()
 
 
 def cmd_connect(args):
