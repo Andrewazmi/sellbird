@@ -1341,6 +1341,7 @@ def main():
 
     # sellbird setup
     sub = subparsers.add_parser("setup", help="Run the interactive setup wizard")
+    sub.add_argument("--project", metavar="NAME", help="Set up this project (projects mode)")
     sub.set_defaults(func=cmd_setup)
 
     # sellbird run
@@ -1352,6 +1353,7 @@ def main():
     # sellbird train <url>
     sub = subparsers.add_parser("train", help="Train Sellbird on a website")
     sub.add_argument("url", help="Website URL to crawl and learn from")
+    sub.add_argument("--project", metavar="NAME", help="Train this project (projects mode)")
     sub.add_argument(
         "max_pages",
         nargs="?",
@@ -1577,6 +1579,10 @@ def main():
     sub.add_argument("value", nargs="?", default="", help="add: an address or domain; remove: its id")
     sub.set_defaults(func=cmd_suppressions)
 
+    # sellbird projects
+    from sellbird.projects_cli import add_parser as add_projects_parser
+    add_projects_parser(subparsers)
+
     # Commands that installed extensions add (sellbird.extensions). A name the
     # built-in CLI already uses is refused, so an extension never hides one.
     from sellbird import extensions
@@ -1613,7 +1619,20 @@ def main():
         sys.exit(0)
 
     try:
-        args.func(args)
+        project = getattr(args, "project", None)
+        if project and args.command in ("setup", "train"):
+            # Projects mode: the command reads and writes that project's files.
+            from sellbird.projects import UnknownProject, project_home
+            from sellbird.workspace_home import use_home
+            try:
+                chosen = project_home(home_root, project)
+            except UnknownProject as e:
+                print(f"\n  {e}\n")
+                sys.exit(1)
+            with use_home(chosen):
+                args.func(args)
+        else:
+            args.func(args)
     except KeyboardInterrupt:
         print("\n  Interrupted. Goodbye.")
         sys.exit(130)

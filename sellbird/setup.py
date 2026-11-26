@@ -85,7 +85,12 @@ def _read_env_file() -> dict[str, str]:
 def _config_file() -> Path:
     """The config Sellbird loads: sellbird.local.yaml (what `sellbird train` writes)
     wins over sellbird.yaml when it exists, as in config._find_config_file.
-    Setup reads and writes this file, so its answers are the ones Sellbird uses."""
+    Setup reads and writes this file, so its answers are the ones Sellbird uses.
+    A project (sellbird.projects) has just its own sellbird.yaml."""
+    from sellbird.workspace_home import _HOME
+    home = _HOME.get()
+    if home is not None and home.project:
+        return home.config_file
     local = CONFIG_FILE.with_name("sellbird.local.yaml")
     return local if local.exists() else CONFIG_FILE
 

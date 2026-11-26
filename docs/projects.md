@@ -76,6 +76,8 @@ Projects mode is on when `<root>/projects/` holds at least one folder with a
 `sellbird.yaml` in it. A project's name is its folder name, which must match
 `^[a-z0-9][a-z0-9-]{0,39}$`. There is no list to keep in sync: adding a
 folder adds a project, and a folder without a `sellbird.yaml` is ignored.
+`projects/` and `sellbird.projects.yaml` are gitignored, like
+`sellbird.local.yaml`: they hold trained settings and databases.
 
 `sellbird.projects.yaml` is optional and small:
 
@@ -99,7 +101,8 @@ A project's `Home` comes from a new `Home.for_project(root, name)`:
 
 Prompts and skills resolve per file: the project's copy, then the root's, then
 the copy shipped with Sellbird. `brain._read_knowledge` already falls back to
-the shipped copy, and it gains the root step.
+the shipped copy, and it gains the root step (`Home.knowledge_dirs`). Social
+playbooks and a relative `writer.email_rules` path resolve the same way.
 
 Extensions need no change. An extension that keeps its settings beside the
 `sellbird.yaml` in use reads the project's own file. Tick steps already get
@@ -118,10 +121,16 @@ Stopping the process stops every task through the existing stop event.
 project (a systemd template unit, say) for anyone who prefers process
 isolation; both ways use the same homes and the same shared layer.
 
-The lock and PID files move from the process root to the current home's
-`data_dir`, so two projects never share a lock and one project can never run
-twice. Outside projects mode the current home is the root, so the files stay
-where they are now.
+Each project has its own lock and PID file in its `data_dir`, so one project
+can never run twice. The all-projects runner also holds the root's
+`data/sellbird.lock` and writes the root's `data/sellbird.pid`, the files the
+dashboard already reads to tell whether the loop is running; `--project NAME`
+holds only that project's. The all-projects runner skips, with a line saying
+so, a project another process is already running, and one that isn't set up.
+Outside projects mode nothing moves (`sellbird/pidfile.py` says all this).
+
+Log lines name their project (`[sellbird.sender:product-a]`), read from the
+task's home, so threads it starts are named too.
 
 Each project keeps its own `usage.max_daily_claude_percent`, and they all
 spend one Claude account. `sellbird projects check` warns when they add up
@@ -160,12 +169,26 @@ There are two caps:
    `per_inbox_daily_cap` and warm-up ramp, exactly as today.
 2. **Per inbox, across projects:** `inbox_daily_cap` in
    `sellbird.projects.yaml`. In projects mode the Sender writes one row per cold
-   send to `shared.db`'s `inbox_sends(inbox, project, sent_at)`. Before sending,
-   a project's room on an inbox is the smaller of its own remaining cap and
-   `inbox_daily_cap` minus today's rows for that inbox from every project.
+   send to `shared.db`'s `inbox_sends(inbox, project, sent_at)`, the inbox being
+   its sending address. Before sending, a project's room on an inbox is the
+   smaller of its own remaining cap and `inbox_daily_cap` minus today's rows
+   (from local midnight, as the cold caps count) for that inbox from every
+   project. The row is taken just before the send in one conditional insert,
+   so two projects can't both take the last place, and given back when the
+   provider says the email didn't go.
 
 Replies, follow-ups to people who replied and transactional mail don't count
 against the shared cap, the same as the current cold caps.
+
+Extra inboxes (`sellbird inboxes`) are rows in a project's own database, with
+their sign-ins in the system keychain, so each project connects the extra
+inboxes it sends from. The main mailbox's token files are the root's.
+
+Every project reads the shared inbox for replies, and a project skips a reply
+from someone it has no record of. Gmail and Microsoft 365 reads don't change
+the mailbox; an SMTP/IMAP inbox, which marks what it fetches as seen, fetches
+without marking in projects mode, so one project never hides a reply from
+the project it's for.
 
 ## Suppressions and company claims (the shared layer)
 
@@ -175,7 +198,8 @@ projects mode.
 **Suppressions are global.** It has the same `suppressions` table as a project
 database. In projects mode `StateManager.add_suppression` writes there (opt-out,
 bounce, complaint, manual), and `suppressed_among` checks both the shared table
-and the project's own. The shared `do_not_contact` list is added to every
+and the project's own. Listing shows both, removing removes from both, and
+undoing an opt-out lifts it from both. The shared `do_not_contact` list is added to every
 project's list. An opt-out from project A's email stops project B as well,
 which is what the person who opted out expects. A per-project-only suppression
 is left out of this version: "not a fit for this product" is already a company
@@ -183,14 +207,18 @@ status inside that project.
 
 **A company belongs to one project at a time.** `company_claims(domain,
 project, claimed_at, last_touch_at)` records which project is talking to a
-company. A project claims a company's registrable domain when it sends the
-first email; it's a conditional insert, so two projects racing for the same
-company can't both win. While another project's claim is active (its last
-touch is within `company_claim_days`), the Sender holds the email with the
-reason "another project is in touch with this company", and the Writer skips
-drafting for that company, to save tokens. A claim lapses on its own once the
-last touch is older than `company_claim_days`. A reply from the company renews
-it. `sellbird projects release DOMAIN` ends a claim early.
+company. A company is its domain as Sellbird recorded it (the same key
+discovery dedups on); a prospect whose company has no domain is claimed by
+its address alone, so a free-mail address never claims everyone on that
+provider. A project claims a company when it sends a cold email, and each
+later cold email renews the claim; it's one conditional upsert, so two
+projects racing for the same company can't both win. While another project's
+claim is active (its last touch is within `company_claim_days`), the Sender
+moves the email back a day with the note "Another project is in touch with
+this company", and the Writer skips drafting for that company, to save
+tokens. A claim lapses on its own once the last touch is older than
+`company_claim_days`. A reply from the company renews it. `sellbird projects
+release DOMAIN` ends a claim early.
 
 ## Migrating an existing install
 
@@ -207,12 +235,16 @@ It is a dry run unless `--apply` is given, and `--apply` first writes a
    root;
 5. create `data/shared.db`, copy the project's suppressions into it, and seed
    `company_claims` from every company the project has emailed, dated by its
-   last send.
+   last send (for mail sent through Instantly, which has no Outbox rows, by
+   the prospect's last update).
 
-The loop must be stopped first; `init` refuses while the lock is held. A
-second project is a new folder: `sellbird projects new NAME` copies the
-untrained `sellbird.yaml` template into it, and `sellbird setup --project NAME`
-trains it.
+When `sellbird.local.yaml` is the config, the tracked `sellbird.yaml`
+template stays at the root. The loop must be stopped first; `init` refuses
+while the lock is held. A second project is a new folder: `sellbird projects
+new NAME` copies the untrained `sellbird.yaml` template into it, and `sellbird
+setup --project NAME` (or `sellbird train URL --project NAME`) trains it,
+writing that project's `sellbird.yaml` and its `skills/`. `sellbird projects
+check` loads every project's config and says what's wrong.
 
 ## Backward compatibility
 

@@ -58,3 +58,7 @@ sellbird.yaml.*
 harvey.local.yaml
 harvey.local.yaml.*
 harvey.yaml.*
+
+# Projects (sellbird.projects): each one is a trained config and a database
+projects/
+sellbird.projects.yaml
