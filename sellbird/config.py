@@ -810,7 +810,12 @@ def load_email_rules(config) -> str:
         return ""
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        path = PROJECT_ROOT / path
+        # A project's own file first, then the root's (sellbird.projects).
+        from sellbird.workspace_home import _HOME
+        home = _HOME.get()
+        bases = ([home.root, home.shared_dir.parent]
+                 if home is not None and home.shared_dir is not None else [PROJECT_ROOT])
+        path = next((b / path for b in bases if (b / path).exists()), bases[0] / path)
     try:
         text = read_user_text(path).strip()
     except FileNotFoundError:

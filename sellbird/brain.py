@@ -81,19 +81,21 @@ class BrainUnavailable(Exception):
 
 
 def _read_knowledge(folder: str, name: str) -> str:
-    """``<home>/<folder>/<name>.md``, or the shipped copy when the home has
-    none (a home with no prompts folder, such as a hosted workspace, still
-    gets Sellbird's own prompts and skills). Raises FileNotFoundError when
-    neither exists."""
-    own = getattr(current_home(), f"{folder}_dir") / f"{name}.md"
-    try:
-        return read_user_text(own)
-    except FileNotFoundError:
-        from sellbird.home import bundled_defaults
-        shipped = bundled_defaults()
-        if shipped is None or (shipped / folder / f"{name}.md") == own:
-            raise
-        return read_user_text(shipped / folder / f"{name}.md")
+    """``<home>/<folder>/<name>.md``, then the root's copy for a project,
+    then the shipped copy (a home with no prompts folder, such as a hosted
+    workspace, still gets Sellbird's own prompts and skills). Raises
+    FileNotFoundError when none exists."""
+    tried = [d / f"{name}.md" for d in current_home().knowledge_dirs(folder)]
+    for own in tried:
+        try:
+            return read_user_text(own)
+        except FileNotFoundError:
+            pass
+    from sellbird.home import bundled_defaults
+    shipped = bundled_defaults()
+    if shipped is None or (shipped / folder / f"{name}.md") in tried:
+        raise FileNotFoundError(tried[0])
+    return read_user_text(shipped / folder / f"{name}.md")
 
 
 class Brain:

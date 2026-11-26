@@ -87,6 +87,14 @@ class Home:
     def hosted(self) -> bool:
         return self.mode == "hosted"
 
+    def knowledge_dirs(self, folder: str) -> list[Path]:
+        """Where ``prompts`` or ``skills`` files are looked for, first match
+        wins: this home's own folder, then, for a project, the root's."""
+        dirs = [getattr(self, f"{folder}_dir")]
+        if self.shared_dir is not None:
+            dirs.append(self.shared_dir.parent / folder)
+        return dirs
+
 
 _HOME: ContextVar["Home | None"] = ContextVar("sellbird_home", default=None)
 
