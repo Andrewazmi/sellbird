@@ -790,16 +790,9 @@ async def trulyinbox_other():
 # ── Your offer: what every first email ends by offering (sellbird.offer) ──
 
 def _offer_config_file() -> Path:
-    """Where the offer is saved. The tracked sellbird.yaml template stays
-    untrained: your offer goes in the gitignored sellbird.local.yaml, which
-    then holds your whole config (as `sellbird train` does)."""
-    target = _resolve_config_file()
-    if target.name == "sellbird.yaml":
-        local = target.with_name("sellbird.local.yaml")
-        if not local.exists():
-            shutil.copyfile(target, local)
-        target = local
-    return target
+    """Where the offer is saved (sellbird.offer.editable_config_file)."""
+    from sellbird.offer import editable_config_file
+    return editable_config_file(_resolve_config_file())
 
 
 async def _offer_brain():
@@ -2559,6 +2552,7 @@ async def get_person(prospect_id: str):
     record = await state.person_record(prospect_id)
     if record is None:
         return _refuse("No such person.", 404)
+    record["emails"] = await _with_senders(record.get("emails") or [])
     return record
 
 
@@ -2685,6 +2679,19 @@ def _state():
     return StateManager(db_path=str(DB_PATH))
 
 
+async def _with_senders(rows: list[dict]) -> list[dict]:
+    """Unsent emails as they will read: who each is from, with the sender's
+    name filled in (sellbird.mailboxes.with_senders). Shown as stored when
+    the config can't be read."""
+    from sellbird.config import load_config
+    from sellbird.mailboxes import MailboxStore, with_senders
+    try:
+        config = load_config()
+    except Exception:
+        return rows
+    return await with_senders(MailboxStore(db_path=str(DB_PATH)), config, rows)
+
+
 # What a reviewer needs next to a draft to check its claims against the facts.
 OUTBOX_CONTEXT_SIGNALS = (
     "TECH_STACK", "INCUMBENT_AGENCY", "HIRING_ROLE", "RUNNING_GOOGLE_ADS", "NO_ONLINE_BOOKING",
@@ -2778,14 +2785,15 @@ async def get_outbox_api():
         return {
             **_compliance_view(),
             "paused": await state.get_setting("sending_paused"),
-            "pending": await _with_context(
-                await state.get_outbox(status="pending_review", limit=100)),
+            "pending": await _with_senders(await _with_context(
+                await state.get_outbox(status="pending_review", limit=100))),
             # The list stops at 100; the count is every one waiting.
             "pending_total": int((await query_db(
                 "SELECT COUNT(*) AS n FROM outbox WHERE status = 'pending_review'"))[0]["n"]),
             # Mail going out right now leads the list.
-            "approved": (await state.get_outbox(status="sending", limit=10)
-                         + await state.get_outbox(status="approved", limit=50)),
+            "approved": await _with_senders(
+                await state.get_outbox(status="sending", limit=10)
+                + await state.get_outbox(status="approved", limit=50)),
             "sent": (await query_db(
                 "SELECT * FROM outbox WHERE status = 'sent' "
                 "ORDER BY sent_at DESC LIMIT 25")),
@@ -2910,16 +2918,18 @@ async def outbox_edit(item_id: str, request: Request):
         # instead of failing quietly at send time. Content rules only: the
         # recipient isn't something an edit can change.
         from sellbird.gate import pre_send_check
-        checked = text
+        # A {{sender_name}} tag stays in the draft; it's checked filled in.
+        signed = (await _with_senders([{**item, "subject": subject, "body": text}]))[0]
+        checked = signed["body"]
         footer = _compliance_view()["footer"]
-        if item.get("kind") == "sequence" and footer and not text.rstrip().endswith(footer):
-            checked = text.rstrip() + "\n\n" + footer  # as the Sender will send it
-        gate = pre_send_check("reviewer@example.com", subject, checked)
+        if item.get("kind") == "sequence" and footer and not checked.rstrip().endswith(footer):
+            checked = checked.rstrip() + "\n\n" + footer  # as the Sender will send it
+        gate = pre_send_check("reviewer@example.com", signed["subject"], checked)
         from sellbird.email_style import style_problems
         prospect = await state.get_prospect(item.get("prospect_id") or "")
         names = [n for n in (getattr(prospect, "company", ""), getattr(prospect, "first_name", ""),
                              getattr(prospect, "last_name", "")) if n]
-        style = style_problems(subject, text, shape=False, names=names,
+        style = style_problems(signed["subject"], signed["body"], shape=False, names=names,
                                kind="reply" if item.get("kind") == "reply" else "cold")
         if style:
             return JSONResponse({"success": False,
@@ -2992,6 +3002,16 @@ def _send_as() -> str:
     try:
         from sellbird.config import load_config
         return load_config().persona.email or ""
+    except Exception:
+        return ""
+
+
+def _signs_as() -> str:
+    """The name the main mailbox signs with, for a draft sent by hand."""
+    try:
+        from sellbird.config import load_config
+        from sellbird.mailboxes import main_sender_name
+        return main_sender_name(load_config())
     except Exception:
         return ""
 
@@ -3201,6 +3221,7 @@ async def get_campaigns():
     rows = await query_db("SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 100")
     sellbird_sends = _sellbird_can_send()
     send_as = "" if sellbird_sends else _send_as()
+    signs_as = "" if sellbird_sends else _signs_as()
     footer = _compliance_view()["footer"]
     committed = await _sellbird_committed_ids()
     hand_sent = await _hand_sent_ids()
@@ -3222,6 +3243,7 @@ async def get_campaigns():
             tuple(ids),
         ) if ids else []
         row["send_as"] = send_as
+        row["signs_as"] = signs_as
         # A cold email sent by hand needs the same footer Sellbird adds.
         row["footer"] = footer
         for r in row["recipients"]:

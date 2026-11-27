@@ -564,12 +564,20 @@ def cmd_outbox(args):
 
         pending = await state.get_outbox(status="pending_review", limit=50)
         approved = await state.get_outbox(status="approved", limit=10)
+        try:   # each as it will read: signed as the inbox it is on
+            from sellbird.config import load_config
+            from sellbird.mailboxes import MailboxStore, with_senders
+            pending = await with_senders(MailboxStore(db_path=state.db_path), load_config(), pending)
+        except Exception:
+            pass
         print(f"\n  Outbox — {len(pending)} awaiting approval, "
               f"{len(approved)}+ approved/scheduled")
         print("  " + "=" * 60)
         for item in pending:
             print(f"\n  [{item['id']}] step {item['step']} ({item['kind']}) "
                   f"→ {item['to_email']}  (send {item['send_at'][:16]})")
+            if item.get("from_address"):
+                print(f"  From: {item.get('from_name') or ''} <{item['from_address']}>")
             print(f"  Subject: {item['subject']}")
             body_preview = (item["body"][:200] + "...") if len(item["body"]) > 200 else item["body"]
             for line in body_preview.splitlines():

@@ -193,6 +193,27 @@ _SIGN_OFF_RE = re.compile(
     re.IGNORECASE)
 
 
+# Who an email is from, as merge tags. With several inboxes the inbox is
+# chosen when the email leaves, so a draft names its sender with these and
+# the Sender fills them in with the name of the inbox it actually leaves
+# from (sellbird.mailboxes.sender_name). {{sender_first_name}} is its first
+# word, the way Sellbird's own sign-off reads.
+SENDER_NAME_TAG = "{{sender_name}}"
+SENDER_FIRST_NAME_TAG = "{{sender_first_name}}"
+SENDER_TAG_RE = re.compile(r"\{\{\s*sender_(first_)?name\s*\}\}", re.IGNORECASE)
+
+
+def fill_sender(text: str, name: str) -> str:
+    """``text`` with the sender tags replaced by ``name`` (first word for
+    {{sender_first_name}}). Text without them comes back unchanged."""
+    if not text or not SENDER_TAG_RE.search(text):
+        return text
+    full = " ".join((name or "").split())
+    first = full.split(" ")[0] if full else ""
+    filled = SENDER_TAG_RE.sub(lambda m: first if m.group(1) else full, text)
+    return filled if full else filled.rstrip()
+
+
 def with_sign_off(body: str, name: str) -> str:
     """``body`` ending in the sender's first name on its own line, and no
     other sign-off.
@@ -208,7 +229,8 @@ def with_sign_off(body: str, name: str) -> str:
     while lines:
         last = lines[-1].strip().lstrip("-~ ").strip()
         low = last.lower().rstrip(",.")
-        if not last or _SIGN_OFF_RE.match(last) or low in (first.lower(), full):
+        if (not last or _SIGN_OFF_RE.match(last) or low in (first.lower(), full)
+                or SENDER_TAG_RE.fullmatch(last)):
             lines.pop()
             continue
         m = re.match(r"^(.*?)[,.]?\s+(?:-\s*)?" + re.escape(first) + r"\.?$", last, re.IGNORECASE)

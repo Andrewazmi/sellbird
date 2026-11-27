@@ -2300,7 +2300,11 @@ function renderDraft(it) {
   const editing = _desk.editing === it.id;
   const why = draftWhy(it);
   const first = String(c.contact || '').split(' ')[0] || 'this person';
-  const unsaved = (editing && _desk.unsaved) || {subject: it.subject || '', body: it.body || ''};
+  // An edit starts from the stored text: a {{sender_name}} tag in it becomes
+  // the name of the inbox the email leaves from.
+  const unsaved = (editing && _desk.unsaved) || {subject: it.subject_raw || it.subject || '',
+                                                 body: it.body_raw || it.body || ''};
+  const from = it.from_address ? 'From ' + escHtml(it.from_name ? it.from_name + ' <' + it.from_address + '>' : it.from_address) + ' · ' : '';
   const fixedSubject = it.kind === 'reply' ? ' readonly title="A reply keeps its subject so it stays in the thread"' : '';
   const added = it.kind === 'sequence' && !(it.body || '').trimEnd().endsWith(_desk.footer) ? _desk.footer : '';
   const kind = held ? '<span class="tag t-bad" title="Sellbird held this instead of sending it">Held</span>'
@@ -2333,7 +2337,7 @@ function renderDraft(it) {
         (why.role ? ' ' + escHtml(why.role) + '.' : '') + '</div></div>' +
       (held ? '<div class="banner wait">' + icon('alert') + '<div><b>Sellbird held this instead of sending it</b>' +
         '<p>' + escHtml(held) + '. Read it first: text from a website or an email can try to steer what Sellbird writes.</p></div></div>' : '') +
-      '<p class="draft-to">To ' + escHtml(it.to_email) + ' · sends ' + escHtml(formatDate(it.send_at)) + '</p>' +
+      '<p class="draft-to">' + from + 'To ' + escHtml(it.to_email) + ' · sends ' + escHtml(formatDate(it.send_at)) + '</p>' +
       draft + (added ? '<div class="desk-footer" title="Added when it sends">' + escHtml(added) + '</div>' : '') +
       '<div class="draft-acts">' + acts + '</div>' +
     '</div></div></div></div></div>';
@@ -2951,13 +2955,16 @@ async function showOptOut(prospectId, email) {
 // Opens a filled-in compose window in whatever Gmail account the browser is
 // logged into. Nothing is sent from here — the user reads it and presses Send.
 // Same values as the Sender's _render, so a hand-sent email reads the same.
-function fillMergeVars(text, r) {
+function fillMergeVars(text, r, signsAs) {
   const inbox = r.source === 'company_inbox';
+  const sender = String(signsAs || '').trim().split(/\s+/).join(' ');
   const vals = {
     first_name: r.first_name || (inbox ? 'there' : ''), last_name: r.last_name || '',
     company: r.company || '', title: r.title || '',
     personalization: r.personalization_notes || '',
   };
+  // Who it's from (the Sender fills these for the inbox it sends from).
+  if (sender) { vals.sender_name = sender; vals.sender_first_name = sender.split(' ')[0]; }
   return String(text || '').replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => {
     k = k.toLowerCase();
     return Object.prototype.hasOwnProperty.call(vals, k) ? vals[k] : m;
@@ -2973,16 +2980,16 @@ async function openInGmail(ci, si, ri) {
   const r = c && (c.recipients || [])[ri];
   if (!step || !r) return;
   // Cold email carries the postal address and opt-out line, sent by hand too.
-  const filled = fillMergeVars(step.body, r).trimEnd();
+  const filled = fillMergeVars(step.body, r, c.signs_as).trimEnd();
   const body = filled + (c.footer && !filled.endsWith(c.footer) ? '\n\n' + c.footer : '');
   // authuser picks the Google account Sellbird sends as, not just whichever
   // one the browser happens to be signed into.
   const url = 'https://mail.google.com/mail/?view=cm&fs=1' +
     (c.send_as ? '&authuser=' + encodeURIComponent(c.send_as) : '') +
     '&to=' + encodeURIComponent(r.email) +
-    '&su=' + encodeURIComponent(fillMergeVars(step.subject, r)) +
+    '&su=' + encodeURIComponent(fillMergeVars(step.subject, r, c.signs_as)) +
     '&body=' + encodeURIComponent(body);
-  const left = /\{\{\s*\w+\s*\}\}/.test(fillMergeVars(step.subject, r) + fillMergeVars(step.body, r));
+  const left = /\{\{\s*\w+\s*\}\}/.test(fillMergeVars(step.subject, r, c.signs_as) + filled);
   // No 'noopener' feature string: with it window.open always returns null,
   // so a blocked pop-up could not be told apart from a successful one. The
   // tab opens blank right away (inside the click, so it isn't blocked) and
@@ -3404,6 +3411,7 @@ function openInbox(i) {
           (kind === 'gmail' ? 'Google' : 'Microsoft') + '</button><div style="height:16px"></div>'
         : connectSetupNotice(kind)) + body.replace(/<div class="notice bad"><b>Not connected.<\/b>[\s\S]*?<\/div>/, '');
     }
+    body += signOffSection(ib.id, ib, 'persona.name');
     body += '<div class="modal-section"><h4>Settings</h4><p>Your main mailbox comes from sellbird.yaml: ' +
       'its address is persona.email, its daily cap is channels.email.per_inbox_daily_cap, and pausing it pauses ' +
       'all sending, in the Outbox.</p></div>';
@@ -3421,6 +3429,7 @@ function openInbox(i) {
     '<div class="inline-edit"><input class="form-input" id="ib-name" maxlength="100" placeholder="Your persona name" value="' + escHtml(ib.name || '') + '">' +
     '<button class="btn btn-secondary" onclick="saveInboxName(' + id + ')">Save</button></div>' +
     '<div class="form-hint">The name people see in From.</div></div>';
+  body += signOffSection(ib.id, ib, 'the sender name');
   body += '<div class="modal-section"><h4>Remove this inbox</h4><p>Sellbird stops sending from it, and threads it started end. Its sign-in stays in your keychain.</p>' +
     '<div class="inline-edit" style="margin-top:8px"><input class="form-input" id="ib-confirm" placeholder="Type ' + escHtml(ib.address) + ' to confirm">' +
     '<button class="btn btn-danger" onclick="removeInbox(' + id + ')">Remove</button></div></div>';
@@ -3457,6 +3466,20 @@ function saveInboxCap(id) {
 function saveInboxName(id) {
   inboxPost('/api/inboxes/' + encodeURIComponent(id) + '/name',
             {name: document.getElementById('ib-name').value.trim()}, 'Name saved');
+}
+
+// The name an inbox's emails are signed with, in any script; empty uses the
+// From name. The main mailbox's is persona.sign_off_name.
+function signOffSection(id, ib, fallback) {
+  return '<div class="modal-section"><h4>Signs emails as</h4>' +
+    '<div class="inline-edit"><input class="form-input" id="ib-signoff" maxlength="100" dir="auto" placeholder="Same as ' + escHtml(fallback) + '" value="' + escHtml(ib.sign_off_name || '') + '">' +
+    '<button class="btn btn-secondary" onclick="saveInboxSignOff(' + jsq(id) + ')">Save</button></div>' +
+    '<div class="form-hint">The name in the email itself, in any language. Now: ' + escHtml(ib.signs_as || '') + '.</div></div>';
+}
+
+function saveInboxSignOff(id) {
+  inboxPost('/api/inboxes/' + encodeURIComponent(id) + '/name',
+            {sign_off_name: document.getElementById('ib-signoff').value.trim()}, 'Sign-off saved');
 }
 
 function removeInbox(id) {

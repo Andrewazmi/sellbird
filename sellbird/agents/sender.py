@@ -32,8 +32,8 @@ from sellbird.integrations.precleared import (
     UNKNOWN_ATTEMPTS, UNKNOWN_RETRY_AFTER, PreclearedClient, clear_hold, record_hold,
 )
 from sellbird.integrations.signature import signature_problem
-from sellbird.email_style import style_problems
-from sellbird.mailboxes import Inboxes, load_inboxes
+from sellbird.email_style import fill_sender, style_problems
+from sellbird.mailboxes import Inboxes, load_inboxes, main_sender_name
 from sellbird.sending_mode import SIGNATURE_HOLD_PREFIX, sync_sending_mode
 from sellbird.state import (
     AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
@@ -91,6 +91,12 @@ def _local_now() -> datetime:
     """Timezone-aware local now, for "today" counted from local midnight.
     Tests pin it."""
     return datetime.now().astimezone()
+
+
+def _signed(item: dict, name: str) -> dict:
+    """``item`` with its sender tags filled in with ``name``."""
+    return {**item, "subject": fill_sender(item.get("subject") or "", name),
+            "body": fill_sender(item.get("body") or "", name)}
 
 
 class Sender:
@@ -1013,6 +1019,9 @@ class Sender:
             elif item["kind"] == "sequence" and sent_cold >= cold_left:
                 held_cold += 1
                 continue
+            # Signed as the inbox it leaves from, before any check reads it.
+            signer = inbox.sender if inbox is not None else main_sender_name(self.config)
+            item = _signed(item, signer)
             needs_check = self.precleared is not None and item["kind"] == "sequence"
 
             prospect = await self.state.get_prospect(item["prospect_id"])
@@ -1149,7 +1158,7 @@ class Sender:
                 continue
             # Send the email as it is now, not as the queue read it: it may
             # have been edited and approved again since.
-            item = await self.state.get_outbox_item(item["id"]) or item
+            item = _signed(await self.state.get_outbox_item(item["id"]) or item, signer)
             # Whatever landed between the checks above and the claim (a reply
             # sets the status before it cancels) is caught here, with fresh
             # data. From now on nothing else can cancel this email.
@@ -1220,7 +1229,7 @@ class Sender:
             # A note that the check moved it back no longer applies.
             note = {"error": ""} if (item.get("error") or "").startswith(MOVED_BACK_PREFIXES) else {}
             await self.state.update_outbox_item(
-                item["id"], status="sent", sent_at=now_iso, body=body,
+                item["id"], status="sent", sent_at=now_iso, subject=item["subject"], body=body,
                 message_id=result.message_id, thread_ref=result.thread_ref, **note,
                 **note_inbox,
             )

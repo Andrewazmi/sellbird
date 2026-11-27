@@ -99,6 +99,10 @@ async def list_inboxes():
             "main": inbox.main,
             "address": inbox.address,
             "name": inbox.name,
+            # The name its emails are signed with, and the one you set (empty: name).
+            "signs_as": inbox.sender,
+            "sign_off_name": ((getattr(config.persona, "sign_off_name", "") or "") if inbox.main
+                              else row.get("sign_off_name") or ""),
             "connection": "main" if inbox.main else row.get("connection", ""),
             "provider": email.provider if inbox.main else row.get("provider", ""),
             "state": state,
@@ -181,15 +185,41 @@ async def set_inbox_cap(mailbox_id: str, request: Request):
 
 @router.post("/api/inboxes/{mailbox_id}/name")
 async def set_inbox_name(mailbox_id: str, request: Request):
+    """{"name": ...} is the name shown in From; {"sign_off_name": ...} the
+    name its emails are signed with, in any script. Either or both. The main
+    mailbox's are persona.name and persona.sign_off_name in the config file."""
+    body = await _body(request)
+    name, sign_off = body.get("name"), body.get("sign_off_name")
+    if name is None and sign_off is None:
+        return _refuse("Give a name, a sign-off name, or both.")
+    for value in (name, sign_off):
+        if value is not None and (not isinstance(value, str) or len(value) > 100
+                                  or any(c in value for c in "\r\n<>\"")):
+            return _refuse("A name is up to 100 characters, on one line, without < > or \".")
+    if mailbox_id == MAIN_PATH:
+        return _set_main_names(name, sign_off)
     store = _store()
     await store.init_db()
     row = await _row(store, mailbox_id)
     if row is None:
         return _refuse("No connected inbox with that id.", 404)
-    name = (await _body(request)).get("name")
-    if not isinstance(name, str) or len(name) > 100 or any(c in name for c in "\r\n<>\""):
-        return _refuse("A name is up to 100 characters, on one line, without < > or \".")
-    await store.set_display_name(row["id"], name)
+    if name is not None:
+        await store.set_display_name(row["id"], name)
+    if sign_off is not None:
+        await store.set_sign_off_name(row["id"], sign_off)
+    return {"success": True}
+
+
+def _set_main_names(name, sign_off):
+    from sellbird import dashboard
+    from sellbird.offer import save_company
+    fields = {k: v for k, v in (("name", name), ("sign_off_name", sign_off)) if v is not None}
+    if not (fields.get("name", "x") or "").strip():
+        return _refuse("The main mailbox needs a name (persona.name).")
+    try:
+        save_company(dashboard._offer_config_file(), "persona", fields)
+    except ValueError as e:
+        return _refuse(f"Not saved: {e}.")
     return {"success": True}
 
 

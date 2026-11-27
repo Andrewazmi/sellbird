@@ -19,7 +19,10 @@ One drain cycle works on an `Inboxes`, read once:
 - each extra inbox has its own daily cold cap (`per_inbox_daily_cap`, or the
   user's own number for that inbox, under the warmup ramp from the day it
   started warming); the main mailbox keeps `max_daily_sends` and its ramp;
-- a paused inbox sends nothing, and its unsent first emails move to another.
+- a paused inbox sends nothing, and its unsent first emails move to another;
+- each inbox signs as its own persona: a draft names its sender with
+  {{sender_name}} / {{sender_first_name}}, filled in with `sender_name` of
+  the inbox the email actually leaves from.
 
 What a connection is (OAuth, SMTP) is an engine concern; an extension can add
 another kind with ``registry.add_mailbox_connection`` (sellbird.extensions).
@@ -37,6 +40,7 @@ from typing import Literal
 import aiosqlite
 
 from sellbird.config import WarmupConfig, cold_daily_cap
+from sellbird.email_style import SENDER_TAG_RE, fill_sender
 from sellbird.integrations.mail_provider import MailIdentity, MailProvider, identity_from_config
 from sellbird.secrets import SecretStore, SecretStoreUnavailable
 from sellbird.state import StateManager, _new_id, _norm
@@ -227,6 +231,14 @@ class MailboxStore(StateManager):
             await db.commit()
             return cur.rowcount > 0
 
+    async def set_sign_off_name(self, mailbox_id: str, name: str) -> bool:
+        """The name this inbox signs with; empty goes back to its display name."""
+        async with self._connect() as db:
+            cur = await db.execute("UPDATE mailboxes SET sign_off_name = ? WHERE id = ?",
+                                   (" ".join((name or "").split()), mailbox_id))
+            await db.commit()
+            return cur.rowcount > 0
+
     async def retire(self, mailbox_id: str) -> bool:
         """Stop using an inbox for good. Its unsent first emails move to
         another inbox at the next send; threads already started there end."""
@@ -319,6 +331,46 @@ class MailboxStore(StateManager):
         row = await self._one("SELECT COALESCE(mailbox_id, '') AS m FROM conversations"
                               " WHERE id = ?", (conversation_id,))
         return row["m"] if row else MAIN
+
+
+# ── Who an inbox signs as ──
+
+def main_sender_name(config) -> str:
+    """The name the main mailbox signs with: persona.sign_off_name, else persona.name."""
+    persona = getattr(config, "persona", None)
+    return ((getattr(persona, "sign_off_name", "") or "").strip()
+            or (getattr(persona, "name", "") or "").strip())
+
+
+def sender_name(row: dict | None, config) -> str:
+    """The name an inbox signs with: its sign-off name, else the name it
+    shows in From, else the main mailbox's. ``row`` None is the main mailbox."""
+    row = row or {}
+    return ((row.get("sign_off_name") or "").strip()
+            or (row.get("display_name") or "").strip()
+            or main_sender_name(config))
+
+
+async def with_senders(store: MailboxStore, config, rows: list[dict]) -> list[dict]:
+    """Outbox rows as they will read when sent, for showing to a person.
+
+    Each gets from_name and from_address: the inbox it is on now (the main
+    mailbox until a thread is given one). Sender tags in its subject and
+    body are filled in for that inbox, and subject_raw / body_raw keep the
+    stored text, which an edit starts from. The Sender fills the tags again
+    at send time, for the inbox the email really leaves from."""
+    boxes = {r["id"]: r for r in await store.list_mailboxes(include_retired=True)}
+    main = identity_from_config(config)
+    for row in rows:
+        box = boxes.get(row.get("mailbox_id") or MAIN)
+        row["from_address"] = box["address"] if box else main.address
+        row["from_name"] = ((box.get("display_name") or "").strip() if box else "") or main.display_name
+        subject, body = row.get("subject") or "", row.get("body") or ""
+        if SENDER_TAG_RE.search(subject + body):
+            name = sender_name(box, config)
+            row["subject_raw"], row["body_raw"] = subject, body
+            row["subject"], row["body"] = fill_sender(subject, name), fill_sender(body, name)
+    return rows
 
 
 # ── Caps ──
@@ -495,6 +547,7 @@ class Inbox:
     sent_today: int               # cold emails sent today
     queued_first: int             # unsent first emails waiting here
     paused_reason: str = ""
+    sender: str = ""              # the name its emails are signed with
     sent_this_cycle: int = 0
 
     @property
@@ -653,7 +706,7 @@ async def load_inboxes(state, config, env, main_provider: MailProvider | None, *
             id=MAIN, address=persona.address, name=persona.display_name,
             provider=main_provider, cap=cap,
             sent_today=await store.sent_since(MAIN, since, kind="sequence"),
-            queued_first=queued.get(MAIN, 0))
+            queued_first=queued.get(MAIN, 0), sender=main_sender_name(config))
     if cache is not None:
         for gone in set(cache) - {r["id"] for r in rows}:
             del cache[gone]
@@ -677,6 +730,6 @@ async def load_inboxes(state, config, env, main_provider: MailProvider | None, *
             provider=provider, cap=inbox_cold_cap(row, email_cfg, today),
             sent_today=await store.sent_since(row["id"], since, kind="sequence"),
             queued_first=queued.get(row["id"], 0),
-            paused_reason=row.get("paused_reason") or "")
+            paused_reason=row.get("paused_reason") or "", sender=sender_name(row, config))
     pools = await store.campaign_pools() if len(inboxes) > 1 else {}
     return Inboxes(store=store, inboxes=inboxes, pools=pools, routed_mail=routed)
