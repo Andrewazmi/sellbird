@@ -732,7 +732,9 @@ class Brain:
         for key, value in kwargs.items():
             template = template.replace(f"{{{{{key}}}}}", str(value))
         # Surface templating mistakes early instead of sending {{foo}} to Claude
-        leftover = re.findall(r"\{\{(\w+)\}\}", template)
+        # ({{sender_name}} is a merge tag a draft keeps; see sellbird.email_style.)
+        leftover = [v for v in re.findall(r"\{\{(\w+)\}\}", template)
+                    if v not in ("sender_name", "sender_first_name")]
         if leftover:
             logger.warning(
                 f"Prompt '{prompt_name}' has unfilled variables: {sorted(set(leftover))}"

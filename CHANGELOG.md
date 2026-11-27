@@ -7,6 +7,17 @@ minor versions can still change behaviour.
 
 ## [Unreleased]
 
+- **Each inbox signs as its own persona.** With several inboxes, an email's
+  intro and sign-off now name the inbox it actually leaves from, not
+  `persona.name`. Drafts carry `{{sender_name}}` / `{{sender_first_name}}`,
+  filled in at send time, so a first email that moves to another inbox
+  signs as that one, and follow-ups and replies keep their thread's persona.
+  Set the name an inbox signs with, in any script, with
+  `sellbird inboxes name ADDRESS --sign-off NAME` (`main` for the main
+  mailbox, saved as `persona.sign_off_name`) or under Inboxes in the
+  dashboard. Unset, an inbox signs with its From name, then the main
+  mailbox's. Drafts in the Outbox show who they are from.
+
 ## [0.5.0] - 2026-11-24
 
 **Your sales team, inside your agent.** Sellbird now lives where you already

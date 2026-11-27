@@ -39,6 +39,10 @@ class PersonaConfig(BaseModel):
     email: str
     linkedin: str
     tone: str
+    # The name the main mailbox signs its emails with, in any script (say the
+    # name as your prospects write it). Empty: `name`. Other inboxes set
+    # their own with `sellbird inboxes name ADDRESS --sign-off NAME`.
+    sign_off_name: str = ""
 
 
 class OfferConfig(BaseModel):

@@ -941,8 +941,9 @@ class Handler:
             handoff = await self._hand_off_once(prospect, reply_text)
         response = ""
         if intent in AUTO_REPLY_INTENTS and not held and not listed and not handed_off:
-            response = await self._generate_response(intent, reply_text, prospect, convo,
-                                                     handoff=handoff)
+            response = await self._generate_response(
+                intent, reply_text, prospect, convo, handoff=handoff,
+                mailbox_id=(reply_meta or {}).get("mailbox_id") or "")
 
         # 2c. Store the conversation in one write.
         if stored is None:
@@ -1248,7 +1249,8 @@ class Handler:
             convo = Conversation(id="", prospect_id=prospect.id, intent="new_lead", stage="engaged",
                                  thread=[Message(sender="prospect", content=words)])
             try:
-                body = await self._generate_response("new_lead", words, prospect, convo)
+                body = await self._generate_response("new_lead", words, prospect, convo,
+                                                     mailbox_id=lead.get("mailbox_id") or "")
             except BrainUnavailable as e:
                 logger.error(f"Handler: first answers to leads are left for later ({e}).")
                 break
@@ -1539,10 +1541,24 @@ Respond with ONLY the category label, nothing else."""
             await self.state.set_setting(key, json.dumps(outcome))
         return outcome
 
+    async def _signer(self, mailbox_id: str) -> str:
+        """The name the inbox ``mailbox_id`` signs as ('' = the main mailbox)."""
+        from sellbird.mailboxes import MailboxStore, main_sender_name, sender_name
+        if not mailbox_id:
+            return main_sender_name(self.config)
+        try:
+            row = await MailboxStore(db_path=self.state.db_path).get_mailbox(mailbox_id)
+        except Exception:
+            row = None
+        return sender_name(row, self.config)
+
     async def _generate_response(
-        self, intent: str, reply_text: str, prospect, convo: Conversation, handoff: dict | None = None
+        self, intent: str, reply_text: str, prospect, convo: Conversation, handoff: dict | None = None,
+        mailbox_id: str = "",
     ) -> str:
-        """Generate an appropriate response based on intent."""
+        """Generate an appropriate response based on intent. ``mailbox_id`` is
+        the inbox the answer leaves from: it is written as that inbox's persona."""
+        name = await self._signer(mailbox_id)
         history = conversation_history(convo.thread, prospect.full_name())
 
         objection_context = ""
@@ -1573,12 +1589,16 @@ Respond with ONLY the category label, nothing else."""
 
         prompt = self.brain.load_prompt("handler", stage=convo.stage, booking=booking)
         if not prompt:
-            prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
+            prompt = f"""You are {name}, {self.config.persona.role} at {self.config.persona.company}.
 Your tone is: {self.config.persona.tone}
 Product: {self.config.product.name} — {self.config.product.description}
 
 NEXT STEP
 {booking}"""
+        elif name != (self.config.persona.name or "").strip():
+            # This inbox has its own persona: the prospect wrote to them.
+            prompt += (f"\n\nYou are {name}, writing from your own inbox. If the reply "
+                       "gives your name, use exactly that one.")
 
         # Inject objection handling + sales methodology skills
         if self.skills:

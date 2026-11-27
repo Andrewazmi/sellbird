@@ -679,6 +679,12 @@ MIGRATIONS: list[str] = [
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, approved_at TIMESTAMP, posted_at TIMESTAMP);
     CREATE INDEX IF NOT EXISTS idx_social_posts_status ON social_posts(status, created_at);
     """,
+    # ── v24: the name each inbox signs its emails with ──
+    # Any script, unlike display_name (the From header). Empty: display_name,
+    # then the main mailbox's (sellbird.mailboxes.sender_name).
+    """
+    ALTER TABLE mailboxes ADD COLUMN sign_off_name TEXT DEFAULT '';
+    """,
 ]
 
 # The deal on a person (set_deal) and the agent's request log.
@@ -1614,8 +1620,8 @@ class StateManager:
                 return None
             person = found[0]
             emails = await rows(
-                "SELECT id, campaign_id, step, kind, subject, body, status, send_at, sent_at, created_at"
-                " FROM outbox WHERE prospect_id = ? ORDER BY COALESCE(sent_at, send_at, created_at)",
+                "SELECT id, campaign_id, step, kind, subject, body, status, send_at, sent_at, created_at,"
+                " mailbox_id FROM outbox WHERE prospect_id = ? ORDER BY COALESCE(sent_at, send_at, created_at)",
                 (prospect_id,))
             conversations = await rows(
                 "SELECT id, campaign_id, thread_json, intent, stage, status, updated_at"

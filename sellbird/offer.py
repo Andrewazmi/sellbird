@@ -139,8 +139,11 @@ async def preview_email(brain, state, config, entry: str) -> dict:
     if not draft:
         return {"ok": False, "message": "The writer couldn't produce an email that passes the rules. "
                                         "Try again, or reword the offer."}
+    from sellbird.email_style import fill_sender
+    from sellbird.mailboxes import main_sender_name
+    name = main_sender_name(config)       # signed as the main mailbox
     return {"ok": True, "to": f"{prospect.full_name()}, {prospect.title} at {prospect.company}",
-            "subject": draft["subject"], "body": draft["body"]}
+            "subject": fill_sender(draft["subject"], name), "body": fill_sender(draft["body"], name)}
 
 
 def save_offer(config_file: Path, entry: str, ideas: list[str] | None = None) -> Path:
@@ -170,7 +173,7 @@ PROPOSED_KEY = "offer_proposed"
 EDITABLE = {
     "product": {"name": str, "description": str, "pricing": str, "key_benefits": list,
                 "objection_responses": dict},
-    "persona": {"name": str, "role": str, "tone": str},
+    "persona": {"name": str, "role": str, "tone": str, "sign_off_name": str},
     "icp": {"industries": list, "titles": list, "company_size": str, "geography": list},
     "offer": {"entry": str, "booking_url": str},
     # CAN-SPAM's two lines under every cold email.
@@ -199,7 +202,7 @@ def company_view(config, root: Path, proposed: dict | None = None) -> dict:
                     "key_benefits": list(p.key_benefits or []),
                     "objection_responses": dict(p.objection_responses or {})},
         "persona": {"name": s.name, "role": s.role, "company": s.company, "tone": s.tone,
-                    "email": getattr(s, "email", "")},
+                    "email": getattr(s, "email", ""), "sign_off_name": getattr(s, "sign_off_name", "")},
         "icp": {"industries": list(icp.industries or []), "titles": list(icp.titles or []),
                 "company_size": icp.company_size, "geography": list(icp.geography or [])},
         "offer": {**offer_view(config), "proposed": proposed or None},
@@ -227,6 +230,20 @@ def _clean(kind, value):
         return {" ".join(str(k).split())[:MAX_TEXT]: str(v).strip()[:MAX_TEXT]
                 for k, v in list(value.items())[:MAX_ITEMS] if str(k).strip() and str(v).strip()}
     raise ValueError("unknown field type")
+
+
+def editable_config_file(config_file: Path) -> Path:
+    """Where an edit is saved. The tracked sellbird.yaml template stays
+    untrained: edits go in the gitignored sellbird.local.yaml, which then
+    holds your whole config (as `sellbird train` does)."""
+    import shutil
+    target = Path(config_file)
+    if target.name == "sellbird.yaml":
+        local = target.with_name("sellbird.local.yaml")
+        if not local.exists():
+            shutil.copyfile(target, local)
+        target = local
+    return target
 
 
 def save_company(config_file: Path, section: str, fields: dict) -> dict:

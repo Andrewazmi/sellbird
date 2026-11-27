@@ -5,6 +5,7 @@ persona:
   email: "alex@yourcompany.com"
   linkedin: "linkedin.com/in/alex-yourcompany"
   tone: "professional, consultative, confident"
+  # sign_off_name: ""   # the name emails are signed with, if not `name` (any script)
 
 product:
   name: "Your Product"

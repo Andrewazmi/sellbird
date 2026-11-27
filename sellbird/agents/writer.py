@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 from sellbird.brain import Brain
 from sellbird.config import EmailRulesError, SellbirdConfig, compliance_of, load_email_rules
 from sellbird.email_style import (
-    BREAKUP_MAX_WORDS, FIRST_EMAIL_MAX_WORDS, FOLLOW_UP_MAX_WORDS,
-    style_problems, tidy, with_sign_off,
+    BREAKUP_MAX_WORDS, FIRST_EMAIL_MAX_WORDS, FOLLOW_UP_MAX_WORDS, SENDER_FIRST_NAME_TAG,
+    SENDER_NAME_TAG, style_problems, tidy, with_sign_off,
 )
 from sellbird.humanize import humanize, humanizer_enabled
 from sellbird.integrations.mail_provider import NATIVE_PROVIDERS
@@ -216,6 +216,27 @@ class Writer:
     @property
     def is_native(self) -> bool:
         return self.config.channels.email.provider in NATIVE_PROVIDERS
+
+    # Sellbird sends natively from one of several inboxes, picked when the
+    # email leaves: drafts name their sender with merge tags the Sender fills
+    # in for that inbox (sellbird.mailboxes.sender_name). Instantly sends
+    # from its own accounts, so its templates keep persona.name.
+    def _per_inbox(self) -> bool:
+        email = getattr(getattr(self.config, "channels", None), "email", None)
+        return getattr(email, "provider", "") in NATIVE_PROVIDERS
+
+    def _sender_name(self) -> str:
+        return SENDER_NAME_TAG if self._per_inbox() else self.config.persona.name
+
+    def _sign_off_name(self) -> str:
+        return SENDER_FIRST_NAME_TAG if self._per_inbox() else self.config.persona.name
+
+    def _sender_rule(self) -> str:
+        if not self._per_inbox():
+            return ""
+        return ("\n- If the email gives your name (an introduction, or a sign-off the rules ask"
+                "\n  for), write " + SENDER_NAME_TAG + " for it, exactly like that: Sellbird puts in"
+                "\n  the name of the inbox that sends it. Never write another name for yourself.")
 
     async def run(self):
         """Create email campaigns for prospects that need outreach."""
@@ -599,7 +620,7 @@ class Writer:
             product_description=self.config.product.description,
             product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
             product_pricing=self.config.product.pricing,
-            persona_name=self.config.persona.name,
+            persona_name=self._sender_name(),
             persona_company=self.config.persona.company,
             persona_role=self.config.persona.role,
             persona_tone=self.config.persona.tone,
@@ -638,7 +659,7 @@ funding rounds, mutual contacts, metrics, or anything else:
 Requirements:
 {shape}
 {footer_rule(self.config, rules)}
-{strict}{inbox_rule}
+{strict}{inbox_rule}{self._sender_rule()}
 
 Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
 
@@ -691,14 +712,14 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
             product_description=self.config.product.description,
             product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
             product_pricing=self.config.product.pricing,
-            persona_name=self.config.persona.name,
+            persona_name=self._sender_name(),
             persona_company=self.config.persona.company,
             persona_role=self.config.persona.role,
             persona_tone=self.config.persona.tone,
         )
 
         if not prompt:
-            prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
+            prompt = f"""You are {self._sender_name()}, {self.config.persona.role} at {self.config.persona.company}.
 Your tone is: {self.config.persona.tone}
 
 Product: {self.config.product.name}
@@ -750,7 +771,7 @@ Requirements:
 {shape}
 {merge_rule}{style}
 {footer_rule(self.config, rules)}
-{strict}
+{strict}{self._sender_rule()}
 
 Return ONLY a JSON array of {length} item{"" if length == 1 else "s"} (no markdown fences, no commentary):
 [
@@ -801,7 +822,7 @@ Return ONLY a JSON array of {length} item{"" if length == 1 else "s"} (no markdo
         def finish(d: dict) -> dict:
             body = tidy(str(d.get("body") or ""))
             if shape:
-                body = with_sign_off(body, self.config.persona.name)
+                body = with_sign_off(body, self._sign_off_name())
             return {**d, "subject": tidy(str(d.get("subject") or "")), "body": body}
 
         def problems(d: dict) -> list[str]:
@@ -828,7 +849,7 @@ Return ONLY a JSON array of {length} item{"" if length == 1 else "s"} (no markdo
         body = draft["body"]
         if shape:
             # The sign-off is Sellbird's; the model never sees or writes it.
-            first = (self.config.persona.name or "").strip().split(" ")[0]
+            first = (self._sign_off_name() or "").strip().split(" ")[0]
             if first and body.endswith("\n\n" + first):
                 body = body[: -len(first) - 2].rstrip()
         payload = {"subject": draft["subject"], "body": body}

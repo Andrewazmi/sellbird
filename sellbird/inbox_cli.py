@@ -16,6 +16,7 @@ from datetime import date
 from sellbird.mailboxes import (
     HARD_MAX_INBOX_CAP, MAIN, ConnectRefused, MailboxStore, build_provider,
     check_provider_allows_inboxes, connect_oauth_mailbox, connect_smtp_mailbox, load_inboxes,
+    sender_name,
 )
 from sellbird.secrets import SecretStore, SecretStoreUnavailable
 
@@ -75,9 +76,11 @@ def register(subparsers) -> None:
     cap.add_argument("address")
     cap.add_argument("cap", type=_cap, help=f"1-{HARD_MAX_INBOX_CAP}, or 'default'")
 
-    name = actions.add_parser("name", help="Change the name an inbox sends as")
-    name.add_argument("address")
-    name.add_argument("name")
+    name = actions.add_parser("name", help="Change the name an inbox sends and signs as")
+    name.add_argument("address", help=f"The inbox's address; '{MAIN_NAME}' is your main mailbox")
+    name.add_argument("name", nargs="?", default=None, help="Name shown in From")
+    name.add_argument("--sign-off", default=None, metavar="NAME",
+                      help="Name its emails are signed with, in any script ('' for the From name)")
 
     remove = actions.add_parser(
         "remove", help="Stop using an inbox for good (its sign-in stays in your keychain)")
@@ -228,6 +231,11 @@ async def run(args, store: MailboxStore, secrets: SecretStore, config, env) -> i
               + " New threads follow this; threads already started keep their inbox.\n")
         return 0
 
+    if action == "name" and args.name is None and args.sign_off is None:
+        print("\n  Give a name, --sign-off NAME, or both.\n")
+        return 1
+    if action == "name" and args.address.strip().lower() == MAIN_NAME:
+        return _name_main(args, config)
     row = await _find(store, args.address)
     if row is None:
         return 1
@@ -256,8 +264,13 @@ async def run(args, store: MailboxStore, secrets: SecretStore, config, env) -> i
         print(f"\n  {address}: " + (f"up to {args.cap} cold emails a day." if args.cap else
                                      "back to the default daily cap and its warmup ramp.") + "\n")
     elif action == "name":
-        await store.set_display_name(row["id"], args.name)
-        print(f"\n  {address} sends as {args.name.strip() or config.persona.name}.\n")
+        if args.name is not None:
+            await store.set_display_name(row["id"], args.name)
+        if args.sign_off is not None:
+            await store.set_sign_off_name(row["id"], args.sign_off)
+        row = await store.get_mailbox(row["id"])
+        print(f"\n  {address} sends as {row['display_name'] or config.persona.name}"
+              f" and signs as {sender_name(row, config)}.\n")
     elif action == "remove":
         await store.retire(row["id"])
         await store.log_action(action_type="inbox_removed", agent="you",
@@ -265,6 +278,30 @@ async def run(args, store: MailboxStore, secrets: SecretStore, config, env) -> i
         print(f"\n  Removed {address}. Its unsent first emails move to your other inboxes; "
               "follow-ups on threads it started are cancelled. Its sign-in is still in "
               "your keychain (service 'sellbird'); delete it there if you like.\n")
+    return 0
+
+
+def _name_main(args, config) -> int:
+    """The main mailbox's names live in the config file: persona.name and
+    persona.sign_off_name."""
+    from pathlib import Path
+
+    from sellbird.config import _find_config_file
+    from sellbird.offer import editable_config_file, save_company
+
+    fields = {}
+    if args.name is not None:
+        if not args.name.strip():
+            print("\n  The main mailbox needs a name (persona.name).\n")
+            return 1
+        fields["name"] = args.name
+    if args.sign_off is not None:
+        fields["sign_off_name"] = args.sign_off
+    path = editable_config_file(Path(getattr(config, "_source_path", None) or _find_config_file()))
+    saved = save_company(path, "persona", fields)
+    name = saved.get("name") or config.persona.name
+    signs = saved.get("sign_off_name", getattr(config.persona, "sign_off_name", "")) or name
+    print(f"\n  Your main mailbox sends as {name} and signs as {signs} ({path.name}).\n")
     return 0
 
 
