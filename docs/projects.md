@@ -136,7 +136,8 @@ the root's `data/sellbird.pid`, the files the dashboard already reads to tell
 whether the loop is running; `pidfile.py` is unchanged. A second `sellbird
 run` refuses while the first holds the lock. At start the runner skips, with
 a line saying why, a project that isn't set up or whose config fails to
-load, and runs the rest; with none left it exits 1.
+load, and runs the rest; with none left it exits 1. `sellbird --project NAME
+run` is refused: the one runner serves every project.
 
 Code that leaves the event loop for a thread uses `asyncio.to_thread`, which
 copies the context and so the home. `loop.run_in_executor` does not, and
@@ -173,8 +174,9 @@ install instead:
 
 - `sellbird sending pause|resume|status` with no project acts on every
   project in turn (pausing is an emergency stop); with `--project` it acts
-  on that one. Resuming a project also lifts the inbox pauses its bounce
-  rate set (see below).
+  on that one. It names each project it acted on, and says when
+  `SELLBIRD_PROJECT` chose it. Resuming a project also lifts the inbox
+  pauses its bounce rate set (see below).
 - `sellbird suppressions add|remove|list` edits the shared list in
   `shared.db`, which every project checks.
 
@@ -241,6 +243,15 @@ inbox the bounced email left from is written to `shared.db`'s
 `inbox_pauses`. Every project's Sender holds email from a paused inbox and
 logs which project paused it. Resuming sending in that project (`sellbird
 --project NAME sending resume`, or Resume on its dashboard) lifts the pause.
+An install-wide `sellbird sending resume` also lifts pauses set by a
+project that no longer exists (removed or renamed), which nothing else
+could lift. Every project's view shows a paused inbox: the Inboxes page
+marks it "paused for every project by NAME: reason", and the dashboard's
+sending status, its limits and `sellbird sending status` list it.
+`sellbird projects check` lists every inbox pause with its project.
+
+In projects mode the dashboard's own pause banner reads "Sending is paused
+for this project", since `sending_paused` is the project's.
 
 Replies, follow-ups to people who replied and transactional mail don't count
 against the shared cap, the same as the current cold caps.
@@ -292,8 +303,11 @@ release DOMAIN` ends a claim early.
 ## Migrating an existing install
 
 `sellbird projects init NAME` turns a single install into the first project.
-It is a dry run unless `--apply` is given. `--apply` refuses while the loop
-runs or the dashboard is open (stop both first), writes a
+It is a dry run unless `--apply` is given. Both list what would move, and the
+other `*.yaml` files at the root that stay there, with a line that an
+extension keeping its settings in such a file may read it from the root.
+`--apply` refuses, before listing anything, while the loop runs or the
+dashboard is open (stop both first), then writes a
 `data/backup-<UTC time>.tar.gz` of everything it moves (a symlinked file is
 backed up as its contents), then:
 
@@ -314,7 +328,8 @@ backed up as its contents), then:
    that sorts first would be where the dashboard opens.
 
 If any step fails, every file goes back where it was, `sellbird.projects.yaml`
-is restored, and a `shared.db` that `init` created is removed. `.env`, the mailbox tokens, the dashboard and
+is restored, and a `shared.db` that `init` created is removed; in a
+`shared.db` that was already there, the claims seeded for NAME are removed. `.env`, the mailbox tokens, the dashboard and
 agent tokens, `prompts/` and the shipped skills stay at the root. When
 `sellbird.local.yaml` is the config, the tracked `sellbird.yaml` template
 stays at the root too.

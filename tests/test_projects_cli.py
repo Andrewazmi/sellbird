@@ -64,7 +64,9 @@ def test_init_dry_run_changes_nothing(tmp_path, capsys):
     assert ("sellbird.example-extension.yaml  ->  "
             "projects/product-a/sellbird.example-extension.yaml") in out
     assert "skills/product_knowledge.md  ->  projects/product-a/skills/product_knowledge.md" in out
-    assert "compose.yaml" not in out.replace("sellbird.example-extension.yaml", "")
+    assert "compose.yaml  ->" not in out
+    assert "Would leave at the root: compose.yaml." in out       # listed, not moved
+    assert "may read it from the root" in out
     assert "data/sellbird.db  ->  projects/product-a/data/sellbird.db" in out
     assert "Nothing changed" in out
 
@@ -388,3 +390,80 @@ def test_check_refuses_instantly_and_warns_about_a_shared_inbox_with_no_cap(tmp_
         'provider: "gmail"', 'provider: "instantly"', 1), encoding="utf-8")
     problems, _ = projects_cli.check(tmp_path)
     assert len(problems) == 1 and "legacy-c sends through Instantly" in problems[0]
+
+
+# ── Last review round: pauses, run, what was acted on, init's order ──
+
+def test_an_install_wide_resume_lifts_a_pause_from_a_project_thats_gone(two_projects, monkeypatch, capsys):
+    shared = SharedState(two_projects / "data")
+    asyncio.run(shared.pause_inbox("me@example.com", "old-c", "bounce rate 3/20"))
+    asyncio.run(shared.pause_inbox("you@example.com", "product-a", "bounce rate 4/20"))
+    problems, warnings = projects_cli.check(two_projects)
+    assert any("me@example.com is paused for every project by old-c" in w
+               and "no longer exists" in w for w in warnings)
+    assert any("you@example.com is paused for every project by product-a" in w for w in warnings)
+
+    _sellbird(monkeypatch, "--project", "segment-b", "sending", "resume")
+    assert set(asyncio.run(shared.inbox_pauses())) == {"me@example.com", "you@example.com"}
+    _sellbird(monkeypatch, "sending", "resume")
+    assert asyncio.run(shared.inbox_pauses()) == {}
+    assert "set by a project that no longer exists" in capsys.readouterr().out
+
+
+def test_sending_says_which_projects_it_acted_on(two_projects, monkeypatch, capsys):
+    _sellbird(monkeypatch, "sending", "pause")
+    assert "Paused: product-a, segment-b (every project)." in capsys.readouterr().out
+    monkeypatch.setenv("SELLBIRD_PROJECT", "segment-b")
+    _sellbird(monkeypatch, "sending", "resume")
+    out = capsys.readouterr().out
+    assert "segment-b (from SELLBIRD_PROJECT):" in out and "product-a" not in out
+    _sellbird(monkeypatch, "--project", "product-a", "sending", "status")
+    assert "product-a:" in capsys.readouterr().out
+
+
+def test_sending_status_shows_a_shared_inbox_pause_in_every_project(two_projects, monkeypatch, capsys):
+    asyncio.run(SharedState(two_projects / "data").pause_inbox("me@example.com", "product-a", "bounce rate"))
+    _sellbird(monkeypatch, "--project", "segment-b", "sending", "status")
+    assert "me@example.com: paused for every project by product-a" in capsys.readouterr().out
+
+
+def test_run_with_a_project_is_refused(two_projects, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as e:
+        _sellbird(monkeypatch, "--project", "product-a", "run")
+    assert e.value.code == 2
+    assert "serves every project" in capsys.readouterr().out
+
+
+def test_init_refuses_before_listing_what_it_would_move(tmp_path, capsys):
+    asyncio.run(single_install(tmp_path))
+    held = pidfile.hold_loop_lock(tmp_path / "data" / "sellbird.lock")
+    try:
+        assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 1
+    finally:
+        pidfile.release_loop_lock(held)
+    out = capsys.readouterr().out
+    assert "Stop it first" in out and "Moving into" not in out and "->" not in out
+
+
+def test_init_lists_the_yaml_it_leaves_at_the_root(tmp_path, capsys):
+    asyncio.run(single_install(tmp_path))
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 0
+    out = capsys.readouterr().out
+    assert "Left at the root: compose.yaml." in out
+    assert (tmp_path / "compose.yaml").exists()
+
+
+def test_a_failed_init_takes_back_the_claims_it_seeded_into_an_existing_shared_db(tmp_path, monkeypatch):
+    asyncio.run(single_install(tmp_path))
+    shared = SharedState(tmp_path / "data")
+    asyncio.run(shared.init_db())                    # left by an earlier attempt
+    real_load = projects_cli.load_config
+
+    def broken(path=None):
+        real_load(path)
+        raise RuntimeError("config check failed")
+    monkeypatch.setattr(projects_cli, "load_config", broken)
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 1
+    assert (tmp_path / "data" / "shared.db").exists()
+    assert asyncio.run(shared.list_claims()) == []
+    assert (tmp_path / "data" / "sellbird.db").exists()

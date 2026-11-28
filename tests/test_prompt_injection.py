@@ -269,6 +269,21 @@ def test_a_projects_own_skills_count_as_instructions(tmp_path):
         assert autopilot_review("re: hi", leaked, _cfg()) == []
 
 
+def test_the_quote_check_keeps_one_cache_per_project(tmp_path, monkeypatch):
+    """Two projects' Senders in one process each keep their scan (review N-c)."""
+    from sellbird import gate
+    from sellbird.workspace_home import Home, use_home
+    for name in ("product-a", "segment-b"):
+        own = tmp_path / "projects" / name / "skills"
+        own.mkdir(parents=True)
+        (own / "notes.md").write_text(f"{name} sells a thing nobody else sells at all today.\n")
+    monkeypatch.setattr(gate, "_leak_cache", {})
+    for name in ("product-a", "segment-b", "product-a"):
+        with use_home(Home.for_project(tmp_path, name)):
+            autopilot_review("hi", "fine", _cfg())
+    assert len(gate._leak_cache) == 2
+
+
 # ── where it applies ──
 
 

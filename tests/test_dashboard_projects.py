@@ -524,6 +524,36 @@ def test_the_inboxes_page_reads_the_projects_database(client, install):
     assert not (install / "data" / "sellbird.db").exists()
 
 
+def test_a_shared_inbox_pause_shows_in_every_projects_view(client, install):
+    """Review I-b: an inbox one project's bounce rate paused is marked on
+    every project's Inboxes page, sending status and limits."""
+    import shutil
+    from sellbird.shared import SharedState
+    template = Path(__file__).resolve().parent.parent / "sellbird.yaml"
+    for name in ("alpha", "beta"):
+        shutil.copy(template, install / "projects" / name / "sellbird.yaml")
+    asyncio.run(SharedState(install / "data").pause_inbox(
+        "alex@yourcompany.com", "alpha", "bounce rate 3/20"))
+    for name in ("alpha", "beta"):
+        inboxes = client.get("/api/inboxes", headers={HEADER: name}).json()
+        [main] = [i for i in inboxes["inboxes"] if i["main"]]
+        assert main["paused_reason"] == "paused for every project by alpha: bounce rate 3/20"
+        assert inboxes["project"] == name
+        status = client.get("/api/sellbird/status", headers={HEADER: name}).json()
+        assert status["inbox_pauses"] == [{"inbox": "alex@yourcompany.com", "project": "alpha",
+                                           "reason": "bounce rate 3/20"}]
+        limits = client.get("/api/limits", headers={HEADER: name}).json()
+        assert [p["project"] for p in limits["inbox_pauses"]] == ["alpha"]
+
+
+def test_the_pause_banners_say_whose_pause_it_is():
+    """In projects mode a project's own pause isn't "All sending is paused"."""
+    js = (Path(dash.__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+    assert "data.project ? 'Sending is paused for this project'" in js
+    assert "currentProject() ? 'Sending is paused for this project'" in js
+    assert "' is paused for every project</b> by '" in js
+
+
 def test_a_sign_in_shows_on_its_own_projects_page(client, install):
     from sellbird import inbox_routes
     from sellbird.workspace_home import use_home

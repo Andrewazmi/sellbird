@@ -1342,6 +1342,22 @@ NO_PROJECT_COMMANDS = {"install", "run", "dashboard", "gmail", "microsoft", "pre
 INSTALL_WIDE_COMMANDS = {"sending", "suppressions"}
 
 
+def _lift_orphan_pauses(root, names) -> None:
+    """An inbox pause set by a project that's gone (removed or renamed) can't
+    be lifted by resuming that project, so an install-wide resume lifts it."""
+    from pathlib import Path
+    from sellbird.shared import SharedState
+
+    async def _run():
+        shared = SharedState(Path(root) / "data")
+        await shared.init_db()
+        gone = {p["project"] for p in (await shared.inbox_pauses()).values()} - set(names)
+        return sum([await shared.resume_inboxes(project) for project in sorted(gone)])
+    lifted = asyncio.run(_run())
+    if lifted:
+        print(f"  Lifted {lifted} inbox pause(s) set by a project that no longer exists.")
+
+
 def _dispatch(args, root) -> None:
     """Run the command, in its project's home in projects mode."""
     import os
@@ -1359,6 +1375,10 @@ def _dispatch(args, root) -> None:
         return
     if args.command == "mcp":
         args.project = asked
+    if args.command == "run" and args.global_project:
+        print(f"\n  `sellbird run` serves every project in one loop, so it takes no project."
+              f"\n  Run `sellbird run` on its own; it runs {', '.join(names)}.\n")
+        sys.exit(2)
     if args.command in NO_PROJECT_COMMANDS:
         args.func(args)
         return
@@ -1368,6 +1388,9 @@ def _dispatch(args, root) -> None:
         except projects.UnknownProject as e:
             print(f"\n  {e} Projects here: {', '.join(names)}.\n")
             sys.exit(1)
+        if args.command == "sending":
+            print(f"  {asked}" + ("" if (getattr(args, "project", None) or args.global_project)
+                                  else " (from SELLBIRD_PROJECT)") + ":", end="")
         with use_home(home):
             args.func(args)
         return
@@ -1376,6 +1399,11 @@ def _dispatch(args, root) -> None:
             print(f"  {name}:", end="")
             with use_home(projects.project_home(root, name)):
                 args.func(args)
+        if args.sending_action == "resume":
+            _lift_orphan_pauses(root, names)
+        if args.sending_action in ("pause", "resume"):
+            print(f"  {'Paused' if args.sending_action == 'pause' else 'Resumed'}: "
+                  f"{', '.join(names)} (every project).\n")
         return
     if args.command == "suppressions":
         # Any project's view adds to and removes from the shared list.

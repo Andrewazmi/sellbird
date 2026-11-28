@@ -92,6 +92,15 @@ async def _record_agent_request(method: str, path: str, status: int) -> None:
     await state.log_agent_request(method, path, status)
 
 
+async def _inbox_pauses(state) -> list[dict]:
+    """Inboxes a project's bounce rate paused for every project (projects
+    mode; [] otherwise): what every project's view shows."""
+    if state.shared is None:
+        return []
+    await state.shared.init_db()
+    return [{"inbox": inbox, **pause} for inbox, pause in sorted((await state.shared.inbox_pauses()).items())]
+
+
 def _db_path() -> Path:
     """The database of the request's home: its project's in projects mode,
     and otherwise ``DB_PATH`` (the default home reads it, so a patched
@@ -1250,10 +1259,13 @@ async def get_sellbird_status():
         state = _state()
         await state.init_db()
         paused = await state.get_setting("sending_paused") or ""
+        inbox_pauses = await _inbox_pauses(state)
     except Exception:
-        paused = ""
+        paused, inbox_pauses = "", []
     status = {"running": pid is not None, "pid": pid, "started_at": started,
               "sending_paused": paused}
+    if inbox_pauses:
+        status["inbox_pauses"] = inbox_pauses
     if current_home().project:
         # One loop serves every project: Start and Stop act on it.
         status["project"] = current_home().project
@@ -2714,6 +2726,7 @@ async def get_limits():
     return {
         "file": path.name,
         "paused": await state.get_setting("sending_paused") or "",
+        "inbox_pauses": await _inbox_pauses(state),
         "mode": "approval" if email.require_approval else "autopilot",
         "provider": email.provider,
         "max_daily_sends": email.max_daily_sends,

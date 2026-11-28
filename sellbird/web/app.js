@@ -3305,9 +3305,11 @@ async function loadInboxes() {
 
   let html = '';
   if (data.sending_paused) {
-    html += '<div class="notice wait"><b>All sending is paused:</b> ' + escHtml(data.sending_paused) +
+    html += '<div class="notice wait"><b>' + (data.project ? 'Sending is paused for this project'
+      : 'All sending is paused') + ':</b> ' + escHtml(data.sending_paused) +
       '. Resume it in the Outbox.</div>';
   }
+  html += inboxPausesHtml(data.inbox_pauses);
   const list = data.inboxes || [];
   const sending = list.filter(i => i.state === 'sending');
   const capToday = sending.reduce((n, i) => n + (Number(i.cold_cap) || 0), 0);
@@ -4967,15 +4969,23 @@ async function loadLimits() {
   el.innerHTML = limitsHtml(d);
 }
 
+// Inboxes one project's bounce rate paused for every project (projects mode).
+function inboxPausesHtml(pauses) {
+  return (pauses || []).map(p => '<div class="notice wait"><b>' + escHtml(p.inbox) +
+    ' is paused for every project</b> by ' + escHtml(p.project) + ': ' + escHtml(p.reason) +
+    '. Turning sending back on in ' + escHtml(p.project) + ' lifts it.</div>').join('');
+}
+
 function limitsHtml(d) {
   const r = (t, sub, tag, tone) => '<div class="row"><div class="grow"><p class="t">' + t + '</p><p class="s">' + sub + '</p></div>' +
     (tag ? '<span class="tag ' + (tone || '') + '">' + tag + '</span>' : '') + '</div>';
   const file = '<code>' + escHtml(d.file || 'sellbird.yaml') + '</code>';
   const auto = d.mode === 'autopilot', paused = !!d.paused;
   const q = d.quiet_hours || {}, w = d.send_window, t = d.texting;
-  return '<div class="secs">' +
+  return inboxPausesHtml(d.inbox_pauses) + '<div class="secs">' +
     '<section class="sec span"><div class="w"><div class="row"><div class="grow"><p class="t">' +
-      (paused ? 'All sending is paused' : 'Sending is on') + '</p><p class="s">' +
+      (paused ? (currentProject() ? 'Sending is paused for this project' : 'All sending is paused')
+              : 'Sending is on') + '</p><p class="s">' +
       (paused ? escHtml(d.paused) + '. Nothing goes out until you turn it back on. Only you can.'
               : 'One press stops every email and text' + (currentProject() ? ' from this project' : '') +
                 '. Your agent can press it too. Only you can undo it.') + '</p></div>' +

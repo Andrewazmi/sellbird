@@ -76,7 +76,9 @@ async def _row(store: MailboxStore, mailbox_id: str) -> dict | None:
 
 @router.get("/api/inboxes")
 async def list_inboxes():
+    from sellbird import dashboard
     from sellbird.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
+    from sellbird.workspace_home import current_home
 
     store = _store()
     await store.init_db()
@@ -86,12 +88,16 @@ async def list_inboxes():
     main = get_mail_provider(config, env) if native else None
     inboxes = await load_inboxes(store, config, env, main)
     rows = {r["id"]: r for r in await store.list_mailboxes()}
+    shared_pauses = {p["inbox"]: p for p in await dashboard._inbox_pauses(store)}
     out = []
     for inbox in inboxes.inboxes.values():
         row = rows.get(inbox.id, {})
+        shared = shared_pauses.get((inbox.address or "").strip().lower())
+        paused_reason = (f"paused for every project by {shared['project']}: {shared['reason']}"
+                         if shared else inbox.paused_reason)
         if not inbox.connected:
             state = "not_connected"
-        elif inbox.paused_reason:
+        elif paused_reason:
             state = "paused"
         else:
             state = "sending"
@@ -103,7 +109,7 @@ async def list_inboxes():
             "connection": "main" if inbox.main else row.get("connection", ""),
             "provider": email.provider if inbox.main else row.get("provider", ""),
             "state": state,
-            "paused_reason": inbox.paused_reason,
+            "paused_reason": paused_reason,
             "cold_cap": inbox.cap,
             "cap_is_yours": row.get("cap_override") is not None,
             "cold_sent_today": inbox.sent_today,
@@ -124,6 +130,8 @@ async def list_inboxes():
         "campaigns": await store._rows(
             "SELECT id, name, status FROM campaigns ORDER BY created_at DESC LIMIT 200"),
         "sending_paused": paused,
+        "project": current_home().project or "",
+        "inbox_pauses": list(shared_pauses.values()),
         "connect_command": "sellbird inboxes connect gmail|microsoft|smtp --address you@domain",
         "can_connect": _can_connect(env),
         "connect_problems": _connect_problems(env),

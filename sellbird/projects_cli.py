@@ -113,6 +113,14 @@ def check(root: Path) -> tuple[list[str], list[str]]:
     if total > 100:
         warnings.append(f"The projects' usage.max_daily_claude_percent add up to {total:g}%, "
                         "and they all spend one Claude account.")
+    shared_db = root / "data" / "shared.db"
+    if shared_db.exists():
+        pauses = asyncio.run(SharedState(root / "data").inbox_pauses())
+        for inbox, pause in sorted(pauses.items()):
+            gone = "" if pause["project"] in names else \
+                " (that project no longer exists; `sellbird sending resume` lifts it)"
+            warnings.append(f"{inbox} is paused for every project by {pause['project']}: "
+                            f"{pause['reason']}{gone}.")
     if not settings.inbox_daily_cap:
         for address, users in sorted(inboxes.items()):
             if len(users) > 1:
@@ -181,7 +189,10 @@ def init_plan(root: Path, name: str) -> dict:
     moves += [(p, folder / "skills" / p.name) for p in skills]
     moves += [(p, folder / "data" / p.name) for p in db_files]
     moves += [(config, folder / "sellbird.yaml")]
-    return {"folder": folder, "moves": moves, "has_db": bool(db_files)}
+    moving = {src for src, _ in moves}
+    left = sorted(p for p in root.glob("*.yaml")
+                  if p not in moving and p.name not in CONFIG_NAMES)
+    return {"folder": folder, "moves": moves, "has_db": bool(db_files), "left": left}
 
 
 def _backup(root: Path, paths: list[Path]) -> Path:
@@ -278,6 +289,16 @@ def _shared_files(root: Path) -> list[Path]:
     return [root / "data" / f"shared.db{s}" for s in ("", "-wal", "-shm")]
 
 
+async def _drop_claims(root: Path, name: str) -> None:
+    """Remove ``name``'s claims from a shared.db that was there before init
+    (from a run that failed). No project by that name exists yet, so every
+    claim it holds is one init seeded."""
+    shared = SharedState(root / "data")
+    async with shared._connect() as conn:
+        await conn.execute("DELETE FROM company_claims WHERE project = ?", (name,))
+        await conn.commit()
+
+
 def _set_default(settings: Path, name: str) -> None:
     """Make the first project the dashboard's default, so a project added
     later (empty, maybe first in the alphabet) doesn't open instead. Never
@@ -319,6 +340,8 @@ def _apply(root: Path, name: str, plan: dict) -> tuple[int, int]:
             src.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp), str(src))
         shutil.rmtree(staging, ignore_errors=True)
+        if had_shared:
+            asyncio.run(_drop_claims(root, name))     # what this run seeded
         if settings_before is None:
             settings.unlink(missing_ok=True)
         else:
@@ -337,20 +360,26 @@ def cmd_init(root: Path, name: str, apply: bool) -> int:
     except (ValueError, projects.UnknownProject) as e:
         print(f"\n  {e}\n")
         return 1
+    if apply:
+        busy = _busy(root)
+        if busy:
+            print(f"\n  {busy}\n")
+            return 1
     print(f"\n  {'Moving' if apply else 'Would move'} into {plan['folder']}:")
     for src, dst in plan["moves"]:
         print(f"    {src.relative_to(root)}  ->  {dst.relative_to(root)}")
     print("  Staying at the root, shared by every project: .env, the mailbox tokens,\n"
           "  the dashboard and agent tokens, prompts/ and the shipped skills.")
+    if plan["left"]:
+        print(f"  {'Left' if apply else 'Would leave'} at the root: "
+              f"{', '.join(p.name for p in plan['left'])}.\n"
+              "  Only sellbird.<name>.yaml files move; an extension that keeps its settings\n"
+              "  in another file may read it from the root.")
     print(f"  {'Creating' if apply else 'Would create'} data/shared.db with this install's "
           "suppressions, a claim on every company it has emailed, and its agent switch.")
     if not apply:
         print("\n  Nothing changed. Run again with --apply to do it.\n")
         return 0
-    busy = _busy(root)
-    if busy:
-        print(f"\n  {busy}\n")
-        return 1
     db = root / "data" / "sellbird.db"
     if db.exists():
         # Fold the write-ahead log into the database, so the files moved are whole.

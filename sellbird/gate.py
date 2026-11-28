@@ -435,8 +435,12 @@ def _instruction_runs(folders) -> dict[tuple, str]:
     from sellbird.untrusted import UNTRUSTED_RULE
     files = sorted(p for folder in folders for p in Path(folder).glob("*.md")
                    if p.name not in _SAY_ALOUD_FILES)
-    key = (tuple(map(str, folders)), tuple((str(p), p.stat().st_mtime_ns) for p in files))
-    if _leak_cache.get("key") != key:
+    # One entry per set of folders: two projects' Senders in one process
+    # don't throw each other's out every cycle.
+    folders_key = tuple(map(str, folders))
+    key = tuple((str(p), p.stat().st_mtime_ns) for p in files)
+    cached = _leak_cache.get(folders_key)
+    if cached is None or cached[0] != key:
         runs: dict[tuple, str] = {}
         sources = [(p.name, _QUOTED_RE.sub(" | ", "\n".join(
             line for line in p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -446,8 +450,8 @@ def _instruction_runs(folders) -> dict[tuple, str]:
             words = _words(text)
             for i in range(len(words) - LEAK_RUN_WORDS + 1):
                 runs.setdefault(tuple(words[i:i + LEAK_RUN_WORDS]), name)
-        _leak_cache.update(key=key, runs=runs)
-    return _leak_cache["runs"]
+        cached = _leak_cache[folders_key] = (key, runs)
+    return cached[1]
 
 
 # A phone number as a reader would dial it: 7 to 15 digits, with the usual
