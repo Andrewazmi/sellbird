@@ -191,3 +191,27 @@ def test_email_rules_resolve_per_file(tmp_path):
         own.mkdir(parents=True)
         (own / "email_rules.md").write_text("project rules", encoding="utf-8")
         assert load_email_rules(config) == "project rules"
+
+
+# ── Mailbox tokens: several loops may refresh one file (review N4) ──
+
+@pytest.mark.parametrize("module", ["gmail", "microsoft"])
+def test_a_token_is_written_whole_and_private(tmp_path, monkeypatch, module):
+    import importlib
+    import os
+    import sys
+    mod = importlib.import_module(f"sellbird.integrations.{module}")
+    with use_home(Home.for_root(tmp_path)):
+        mod._save_token({"refresh_token": "first"})
+        path = Path(getattr(Home.for_root(tmp_path),
+                            "gmail_token_file" if module == "gmail" else "m365_token_file"))
+        if sys.platform != "win32":
+            assert path.stat().st_mode & 0o777 == 0o600
+
+        def broken(*a, **k):
+            raise OSError("disk full")
+        monkeypatch.setattr(os, "replace", broken)
+        with pytest.raises(OSError):
+            mod._save_token({"refresh_token": "second"})
+    assert '"first"' in path.read_text(encoding="utf-8")       # the old token, whole
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []
