@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import sellbird.dashboard as dash
-from sellbird import pidfile
+from sellbird import pidfile, projects
 from sellbird.state import StateManager
 
 HEADER = "X-Sellbird-Project"
@@ -323,7 +323,7 @@ def test_start_in_projects_mode_does_not_need_this_tabs_project_trained(client, 
     assert r["success"] is False and "isn't set up" in r["message"] and not launched   # no .env yet
     (install / ".env").write_text("X=1\n", encoding="utf-8")
     r = client.post("/api/sellbird/start", headers={HEADER: "alpha"}).json()
-    assert r["success"] is True and len(launched) == 1
+    assert r["success"] is True and len(launched) == 1, r
     args, kwargs = launched[0]
     assert args[0][-2:] == ["sellbird", "run"] and kwargs["cwd"] == str(install)
     dash._sellbird_process = None
@@ -491,3 +491,29 @@ def test_sellbird_mcp_project_pins_the_server(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["sellbird", "mcp"])
     cli.main()
     assert seen == ["beta", None]
+
+
+# ── Inboxes: each project's own database (review B3) ──
+
+
+def test_the_inboxes_page_reads_the_projects_database(client, install):
+    import shutil
+    template = Path(__file__).resolve().parent.parent / "sellbird.yaml"
+    shutil.copy(template, install / "projects" / "alpha" / "sellbird.yaml")
+    asyncio.run(StateManager(str(_db(install, "alpha"))).set_setting("sending_paused", "alpha-paused"))
+    r = client.get("/api/inboxes", headers={HEADER: "alpha"})
+    assert r.status_code == 200, r.text
+    assert r.json()["sending_paused"] == "alpha-paused"
+    assert not (install / "data" / "sellbird.db").exists()
+
+
+def test_a_sign_in_shows_on_its_own_projects_page(client, install):
+    from sellbird import inbox_routes
+    from sellbird.workspace_home import use_home
+    with use_home(projects.project_home(install, "alpha")):
+        inbox_routes._job().update(state="waiting", kind="gmail", address="a@example.com")
+    try:
+        assert client.get("/api/inboxes/connect/status", headers={HEADER: "alpha"}).json()["state"] == "waiting"
+        assert client.get("/api/inboxes/connect/status", headers={HEADER: "beta"}).json()["state"] == "idle"
+    finally:
+        inbox_routes._connect_jobs.clear()
