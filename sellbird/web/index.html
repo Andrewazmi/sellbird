@@ -77,6 +77,7 @@
     <span class="status-dot stopped" id="header-dot"></span>
     <span id="header-status-text">Checking…</span>
   </button>
+  <label class="qselect projswitch" id="project-switch" hidden><span class="sr-only">Project</span><select id="project-select" onchange="switchProject(this.value)"></select></label>
   <button type="button" class="agentchip not-connected" id="agent-chip" onclick="goTab('agent')" aria-label="Your agent. Open its settings"><span class="dot-live" aria-hidden="true"></span><span class="lbl">Your agent</span></button>
   <div class="brand-tools">
     <button type="button" class="tool-btn" onclick="loadCurrentTab()" title="Refresh this page" aria-label="Refresh this page"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg></button>

@@ -46,11 +46,12 @@ def _now() -> str:
 
 
 def _folders() -> list[Path]:
-    """Your skills folder first, then the copies Sellbird ships."""
+    """Your skills folder first (a project's, then the root's), then the
+    copies Sellbird ships."""
     from sellbird.home import bundled_defaults
     from sellbird.workspace_home import current_home
 
-    folders = [Path(current_home().skills_dir)]
+    folders = [Path(d) for d in current_home().knowledge_dirs("skills")]
     shipped = bundled_defaults()
     if shipped is not None and (shipped / "skills") not in folders:
         folders.append(shipped / "skills")

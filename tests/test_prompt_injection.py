@@ -252,6 +252,38 @@ def test_a_passage_from_sellbirds_instructions_is_held(tmp_path):
     assert autopilot_review("hi", "Rival Corp is fine too.", _cfg(), root=tmp_path) == []
 
 
+def test_a_projects_own_skills_count_as_instructions(tmp_path):
+    """In projects mode the trained skills live in the project's folder;
+    quoting them back is a leak like quoting the root's."""
+    from sellbird.workspace_home import Home, use_home
+    own = tmp_path / "projects" / "segment-b" / "skills"
+    own.mkdir(parents=True)
+    (own / "competitive_intel.md").write_text(
+        "# Competitors\nWe undercut Rival Corp on price by thirty percent and their churn is "
+        "high because onboarding takes six weeks for most customers.\n")
+    leaked = "we undercut Rival Corp on price by thirty percent and their churn is high"
+    with use_home(Home.for_project(tmp_path, "segment-b")):
+        [reason] = autopilot_review("re: hi", leaked, _cfg())
+    assert "competitive_intel.md" in reason
+    with use_home(Home.for_root(tmp_path)):
+        assert autopilot_review("re: hi", leaked, _cfg()) == []
+
+
+def test_the_quote_check_keeps_one_cache_per_project(tmp_path, monkeypatch):
+    """Two projects' Senders in one process each keep their scan (review N-c)."""
+    from sellbird import gate
+    from sellbird.workspace_home import Home, use_home
+    for name in ("product-a", "segment-b"):
+        own = tmp_path / "projects" / name / "skills"
+        own.mkdir(parents=True)
+        (own / "notes.md").write_text(f"{name} sells a thing nobody else sells at all today.\n")
+    monkeypatch.setattr(gate, "_leak_cache", {})
+    for name in ("product-a", "segment-b", "product-a"):
+        with use_home(Home.for_project(tmp_path, name)):
+            autopilot_review("hi", "fine", _cfg())
+    assert len(gate._leak_cache) == 2
+
+
 # ── where it applies ──
 
 
