@@ -13,21 +13,29 @@ project shares the install's keys, mailboxes and sign-ins. An install with no
 `projects/` folder works exactly as before (docs/projects.md).
 
 - **One loop for every project.** `sellbird run` runs each project side by
-  side, and skips one whose settings don't load. `sellbird run --project NAME`
-  runs just that one.
+  side, and skips, saying why, one whose settings don't load or that isn't
+  set up. Projects send through Gmail, Microsoft 365 or SMTP; Instantly
+  isn't supported in projects yet.
+- **Every command knows its project.** `sellbird --project NAME <command>`,
+  or `SELLBIRD_PROJECT`, runs a command in that project; without one, a
+  command that reads a project's data asks which. `sellbird sending pause`
+  pauses every project, and `sellbird suppressions` edits the list they share.
 - **Never twice to the same person.** An opt-out, bounce or complaint in one
   project stops every project. A company belongs to one project at a time:
   while one project is in touch, the others hold their emails. An optional
   `inbox_daily_cap` in `sellbird.projects.yaml` counts every project's cold
-  email on a mailbox.
+  email on a mailbox, and a mailbox one project's bounce rate paused stays
+  paused for all of them.
 - **One dashboard, a switcher.** The dashboard serves every project, with a
   project picker in the header; two tabs can work on two projects.
   `sellbird mcp --project NAME` pins your agent to one project. Turning your
   agent off turns it off for the whole install.
 - **`sellbird projects`.** `init NAME` turns a trained install into its first
   project: it shows what it would move and changes nothing until `--apply`,
-  then backs up first. `new`, `check`, `list` and `release DOMAIN` do the
-  rest, and `setup` and `train` take `--project NAME`.
+  then backs up first, and puts everything back if a step fails. What
+  training learned about your product moves with it. `new`, `check`, `list`,
+  `release DOMAIN` and `init --reseed` do the rest, and `setup` and `train`
+  take `--project NAME`.
 
 ## [0.5.0] - 2026-11-24
 
