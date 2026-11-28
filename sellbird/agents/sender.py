@@ -937,6 +937,8 @@ class Sender:
             from sellbird.projects import install_root, live_settings
             shared_cap = live_settings(install_root()).inbox_daily_cap
         main_address = identity_from_config(self.config).address if self.state.shared is not None else ""
+        # Inboxes a project's bounce rate paused hold every project's email.
+        inbox_pauses = await self.state.shared.inbox_pauses() if self.state.shared is not None else {}
 
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         # In quiet hours only cold email can go, so only cold email is
@@ -1003,6 +1005,7 @@ class Sender:
         # another project's claim on the company.
         held_shared = 0
         held_claimed = 0
+        held_paused: dict[str, str] = {}
         for item in due:
             if sent >= budget:
                 break
@@ -1029,6 +1032,10 @@ class Sender:
                 held_cold += 1
                 continue
             sending_address = inbox.address if inbox is not None else main_address
+            pause = inbox_pauses.get((sending_address or "").strip().lower())
+            if pause:
+                held_paused[sending_address] = pause["project"]
+                continue
             if (shared_cap and item["kind"] == "sequence"
                     and await self.state.shared.inbox_sent_since(sending_address, since_midnight) >= shared_cap):
                 held_shared += 1
@@ -1345,6 +1352,9 @@ class Sender:
         if held_claimed:
             logger.info(f"Sender: {held_claimed} cold email(s) wait: another project is in "
                         "touch with their company.")
+        for address, project in held_paused.items():
+            logger.warning(f"Sender: nothing leaves {address}: project {project}'s bounce rate "
+                           f"paused it. `sellbird --project {project} sending resume` lifts it.")
         if held_cold and inboxes is not None:
             logger.info(f"Sender: {held_cold} cold email(s) wait for their inbox's daily cap. "
                         "Replies still go out. See `sellbird inboxes list`.")

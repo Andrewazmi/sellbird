@@ -1078,10 +1078,16 @@ def cmd_sending(args):
         elif args.sending_action == "resume":
             await state.set_setting("sending_paused", "")
             await state.set_setting("bounce_count", "0")
-            print("\n  Sending resumed (bounce counter reset).\n")
+            lifted = await state.shared.resume_inboxes(state.project) if state.shared else 0
+            print("\n  Sending resumed (bounce counter reset"
+                  + (f", {lifted} inbox pause(s) lifted for every project" if lifted else "")
+                  + ").\n")
         else:
             paused = await state.get_setting("sending_paused")
             print(f"\n  Sending: {'PAUSED — ' + paused if paused else 'active'}\n")
+            for inbox, pause in (await state.shared.inbox_pauses() if state.shared else {}).items():
+                print(f"  {inbox}: paused for every project by {pause['project']} "
+                      f"({pause['reason']})\n")
 
     asyncio.run(_run())
 

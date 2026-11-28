@@ -12,6 +12,9 @@ It holds three things:
   renews the claim, and it lapses on its own;
 - **inbox_sends**: one row per cold email, by inbox and project, so an
   inbox's ``inbox_daily_cap`` counts every project's sends;
+- **inbox_pauses**: an inbox a project's bounce rate paused. Its
+  reputation is every project's, so no project sends from it until the
+  project that tripped it resumes sending;
 - **settings** that are the install's, not a project's: the agent's
   on/off switch, since every project shares the agent's token.
 
@@ -46,6 +49,8 @@ CREATE TABLE IF NOT EXISTS inbox_sends (id INTEGER PRIMARY KEY AUTOINCREMENT,
   inbox TEXT NOT NULL, project TEXT NOT NULL, sent_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_inbox_sends_inbox ON inbox_sends(inbox, sent_at);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS inbox_pauses (inbox TEXT PRIMARY KEY, project TEXT NOT NULL,
+  reason TEXT NOT NULL, paused_at TEXT NOT NULL);
 """
 
 _ready: set[str] = set()
@@ -253,6 +258,30 @@ class SharedState:
         async with self._connect() as db:
             await db.execute("DELETE FROM inbox_sends WHERE id = ?", (row_id,))
             await db.commit()
+
+    # ── Inboxes a bounce rate paused, for every project ──
+
+    async def pause_inbox(self, inbox: str, project: str, reason: str) -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "INSERT INTO inbox_pauses (inbox, project, reason, paused_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(inbox) DO UPDATE SET project = excluded.project,"
+                " reason = excluded.reason, paused_at = excluded.paused_at",
+                (inbox.strip().lower(), project, reason, _iso(_utcnow())))
+            await db.commit()
+
+    async def inbox_pauses(self) -> dict[str, dict]:
+        """{inbox: {"project", "reason"}} for every paused inbox."""
+        async with self._connect() as db:
+            async with db.execute("SELECT inbox, project, reason FROM inbox_pauses") as cursor:
+                return {r[0]: {"project": r[1], "reason": r[2]} for r in await cursor.fetchall()}
+
+    async def resume_inboxes(self, project: str) -> int:
+        """Lift the pauses ``project``'s bounce rate set; how many."""
+        async with self._connect() as db:
+            cursor = await db.execute("DELETE FROM inbox_pauses WHERE project = ?", (project,))
+            await db.commit()
+            return cursor.rowcount
 
 
 # ── The project's view, through its StateManager ──

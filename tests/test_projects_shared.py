@@ -354,3 +354,42 @@ def test_imap_reads_without_marking_in_projects_mode(tmp_path, monkeypatch):
     with use_home(Home.for_project(tmp_path, "product-a")):
         provider._fetch_unseen(10)
     assert fetched == ["(RFC822)", "(BODY.PEEK[])"]
+
+
+@pytest.mark.asyncio
+async def test_a_bounce_rate_trip_pauses_the_inbox_for_every_project(root, monkeypatch, capsys):
+    """The inbox's reputation is every project's (review I4a): one project's
+    bounce rate pausing it holds the others' email from it, until the
+    project that tripped it resumes sending."""
+    from types import SimpleNamespace
+    from sellbird import cli
+    from sellbird.agents import handler as handler_mod
+    from tests.test_outbox_native import make_handler
+    monkeypatch.setattr(handler_mod, "MIN_SENDS_FOR_KILL_SWITCH", 1)
+    a, b = Project(root, "product-a"), Project(root, "segment-b")
+    await a.prospect(email="pat@acme.example", domain="acme.example")
+    await b.prospect(email="sam@other.example", domain="other.example")
+    await a.send()
+    [sent] = await a.state.get_outbox(status="sent")
+
+    with use_home(a.home):
+        bounce = SimpleNamespace(in_reply_to=sent["message_id"], subject="Undeliverable")
+        await make_handler(a.state, a.provider)._handle_bounce(bounce)
+        assert await a.state.get_setting("sending_paused")
+    shared = SharedState(root / "data")
+    assert (await shared.inbox_pauses())["sellbird@x.co"]["project"] == "product-a"
+
+    await b.send()
+    assert b.provider.sent == []        # same inbox: held, not lost
+    assert 1 in [i["step"] for i in await b.state.get_outbox(status="approved")]
+
+    # Resuming segment-b doesn't lift product-a's pause; resuming product-a does.
+    with use_home(b.home):
+        await asyncio.to_thread(cli.cmd_sending, SimpleNamespace(sending_action="resume"))
+    assert await shared.inbox_pauses()
+    with use_home(a.home):
+        await asyncio.to_thread(cli.cmd_sending, SimpleNamespace(sending_action="resume"))
+    assert "1 inbox pause(s) lifted" in capsys.readouterr().out
+    assert await shared.inbox_pauses() == {}
+    await b.send()
+    assert [m["to"] for m in b.provider.sent] == ["sam@other.example"]

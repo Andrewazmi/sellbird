@@ -1380,6 +1380,25 @@ class Handler:
             )
             await self.state.set_setting(KILL_SWITCH_KEY, reason)
             logger.error(f"Handler: KILL SWITCH ENGAGED — {reason}")
+            if self.state.shared is not None:
+                # Projects mode: the inbox's reputation is every project's.
+                inbox = await self._sending_inbox(outbox_item)
+                if inbox:
+                    await self.state.shared.pause_inbox(inbox, self.state.project, reason)
+                    logger.error(f"Handler: {inbox} paused for every project until "
+                                 f"{self.state.project} resumes sending.")
+
+    async def _sending_inbox(self, outbox_item) -> str:
+        """The address the bounced email left from: its inbox's, else this
+        project's main sending address."""
+        from sellbird.integrations.mail_provider import identity_from_config
+        mailbox_id = (outbox_item or {}).get("mailbox_id") or ""
+        if mailbox_id:
+            from sellbird.mailboxes import MailboxStore
+            mailbox = await MailboxStore(db_path=self.state.db_path).get_mailbox(mailbox_id)
+            if mailbox and mailbox.get("address"):
+                return mailbox["address"]
+        return identity_from_config(self.config).address or ""
 
     async def _queue_native_reply(
         self, response: str, prospect, convo, reply_meta: dict, intent: str

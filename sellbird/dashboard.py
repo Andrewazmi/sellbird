@@ -3345,6 +3345,8 @@ async def sending_toggle(action: str, request: Request):
         else:
             await state.set_setting("sending_paused", "")
             await state.set_setting("bounce_count", "0")
+            if state.shared is not None:
+                await state.shared.resume_inboxes(state.project)
         return {"success": True}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
