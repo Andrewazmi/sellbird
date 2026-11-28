@@ -20,7 +20,7 @@ logger = logging.getLogger("sellbird.brain")
 
 from sellbird.paths import PROJECT_ROOT
 from sellbird.textio import read_user_text
-from sellbird.workspace_home import current_home
+from sellbird.workspace_home import TRAINED_SKILLS, current_home
 
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
 SKILLS_DIR = PROJECT_ROOT / "skills"
@@ -83,9 +83,18 @@ class BrainUnavailable(Exception):
 def _read_knowledge(folder: str, name: str) -> str:
     """``<home>/<folder>/<name>.md``, then the root's copy for a project,
     then the shipped copy (a home with no prompts folder, such as a hosted
-    workspace, still gets Sellbird's own prompts and skills). Raises
+    workspace, still gets Sellbird's own prompts and skills). A project's
+    trained skills are its own only, and "" until it is trained. Raises
     FileNotFoundError when none exists."""
-    tried = [d / f"{name}.md" for d in current_home().knowledge_dirs(folder)]
+    home = current_home()
+    tried = [d / f"{name}.md" for d in home.knowledge_dirs(folder, name)]
+    if home.project and folder == "skills" and name in TRAINED_SKILLS:
+        # The shipped folder may be the root itself (a checkout), so it's
+        # skipped too: Sellbird ships no trained skills.
+        try:
+            return read_user_text(tried[0])
+        except FileNotFoundError:
+            return ""
     for own in tried:
         try:
             return read_user_text(own)

@@ -87,14 +87,19 @@ class Home:
     def hosted(self) -> bool:
         return self.mode == "hosted"
 
-    def knowledge_dirs(self, folder: str) -> list[Path]:
+    def knowledge_dirs(self, folder: str, name: str = "") -> list[Path]:
         """Where ``prompts`` or ``skills`` files are looked for, first match
-        wins: this home's own folder, then, for a project, the root's."""
+        wins: this home's own folder, then, for a project, the root's. What
+        training writes about the product (TRAINED_SKILLS) is a project's
+        own: another project's copy at the root would sell the wrong thing."""
         dirs = [getattr(self, f"{folder}_dir")]
-        if self.shared_dir is not None:
+        if self.shared_dir is not None and not (folder == "skills" and name in TRAINED_SKILLS):
             dirs.append(self.shared_dir.parent / folder)
         return dirs
 
+
+# The skills `sellbird train` writes (trainer.py); never shipped.
+TRAINED_SKILLS = ("product_knowledge", "competitive_intel")
 
 _HOME: ContextVar["Home | None"] = ContextVar("sellbird_home", default=None)
 

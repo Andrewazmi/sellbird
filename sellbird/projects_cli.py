@@ -2,12 +2,15 @@
 
 `init` turns a single install into its first project. It is a dry run unless
 --apply is given; --apply first writes data/backup-<UTC time>.tar.gz of
-everything it moves, and refuses while the loop runs.
+everything it moves, refuses while the loop or the dashboard runs, and puts
+every file back if any step fails. `init --reseed` copies the projects'
+suppressions, claims and agent switch into shared.db again.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gzip
 import shutil
 import sqlite3
@@ -20,11 +23,11 @@ import yaml
 
 from sellbird import projects
 from sellbird.config import ConfigError, load_config
-from sellbird.pidfile import loop_lock_held
+from sellbird.pidfile import loop_lock_held, pid_alive
 from sellbird.shared import SharedState
 from sellbird.state import StateManager
 from sellbird.textio import read_user_text
-from sellbird.workspace_home import Home, use_home
+from sellbird.workspace_home import TRAINED_SKILLS, Home, use_home
 
 CONFIG_NAMES = ("sellbird.yaml", "sellbird.local.yaml", projects.SETTINGS_FILE)
 DB_FILES = ("sellbird.db", "sellbird.db-wal", "sellbird.db-shm")
@@ -60,10 +63,10 @@ def cmd_list(root: Path) -> int:
     print()
     for name in names:
         home = Home.for_project(root, name)
-        running = "running" if loop_lock_held(home.data_dir / "sellbird.lock") else ""
         mark = "(default)" if name == default else ""
-        print(f"  {name:<40} {_company(home.config_file) or '-':<30} {mark:<10} {running}")
-    print()
+        print(f"  {name:<40} {_company(home.config_file) or '-':<30} {mark}")
+    running = loop_lock_held(root / "data" / "sellbird.lock")
+    print(f"\n  {'Running: one loop runs every project.' if running else 'Not running.'}\n")
     return 0
 
 
@@ -166,12 +169,18 @@ def init_plan(root: Path, name: str) -> dict:
     if not config.exists() or _company(config) in UNTRAINED:
         raise ValueError("There is no trained config to move. Train this install first, "
                          "or start with `sellbird projects new NAME`.")
-    extensions = sorted(p for p in root.glob("*.yaml") if p.name not in CONFIG_NAMES)
+    # Extension settings sit beside the config as sellbird.<name>.yaml; any
+    # other yaml at the root (a compose file, say) isn't Sellbird's.
+    extensions = sorted(p for p in root.glob("sellbird.*.yaml") if p.name not in CONFIG_NAMES)
+    skills = [root / "skills" / f"{s}.md" for s in TRAINED_SKILLS
+              if (root / "skills" / f"{s}.md").is_file()]
     data = root / "data"
     db_files = [data / f for f in DB_FILES if (data / f).exists()]
-    moves = [(config, folder / "sellbird.yaml")]
-    moves += [(p, folder / p.name) for p in extensions]
+    # The config goes last: a folder becomes a project once it has one.
+    moves = [(p, folder / p.name) for p in extensions]
+    moves += [(p, folder / "skills" / p.name) for p in skills]
     moves += [(p, folder / "data" / p.name) for p in db_files]
+    moves += [(config, folder / "sellbird.yaml")]
     return {"folder": folder, "moves": moves, "has_db": bool(db_files)}
 
 
@@ -179,7 +188,9 @@ def _backup(root: Path, paths: list[Path]) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = root / "data" / f"backup-{stamp}.tar.gz"
     target.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(target, "wb") as gz, tarfile.TarFile(fileobj=gz, mode="w") as tar:
+    # dereference: a symlinked config is backed up as its contents, not a link.
+    with gzip.open(target, "wb") as gz, \
+            tarfile.TarFile(fileobj=gz, mode="w", dereference=True) as tar:
         for p in paths:
             tar.add(p, arcname=str(p.relative_to(root)))
     return target
@@ -203,6 +214,8 @@ def _emailed(db_path: Path) -> dict[str, str]:
                WHERE p.status IN ('contacted', 'replied', 'meeting')
                  AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.prospect_id = p.id
                                  AND o.status = 'sent')""").fetchall()
+    except sqlite3.OperationalError:
+        rows = []       # a database from before the outbox
     finally:
         db.close()
     for domain, email, at in rows:
@@ -213,18 +226,25 @@ def _emailed(db_path: Path) -> dict[str, str]:
     return out
 
 
-async def _seed_shared(root: Path, name: str, db_path: Path | None) -> tuple[int, int]:
-    shared = SharedState(root / "data")
-    await shared.init_db()
-    if db_path is None:
-        return 0, 0
+def _rows(db_path: Path, sql: str) -> list[tuple]:
     db = sqlite3.connect(db_path)
     try:
-        rows = db.execute("SELECT id, kind, value, reason, source, created_at FROM suppressions").fetchall()
+        return db.execute(sql).fetchall()
     except sqlite3.OperationalError:
-        rows = []
+        return []
     finally:
         db.close()
+
+
+async def _seed_shared(root: Path, name: str, db_path: Path | None) -> tuple[int, int]:
+    """Copy a project's suppressions, claims and agent switch into shared.db.
+    Safe to repeat: nothing already there is replaced or doubled."""
+    from sellbird.dashboard import AGENT_ACCESS_KEY
+    shared = SharedState(root / "data")
+    await shared.init_db()
+    if db_path is None or not db_path.exists():
+        return 0, 0
+    rows = _rows(db_path, "SELECT id, kind, value, reason, source, created_at FROM suppressions")
     copied = 0
     async with shared._connect() as conn:
         for row in rows:
@@ -236,7 +256,60 @@ async def _seed_shared(root: Path, name: str, db_path: Path | None) -> tuple[int
     claims = _emailed(db_path)
     for key, at in claims.items():
         await shared.seed_claim(key, name, datetime.fromisoformat(at[:19].replace(" ", "T")))
+    # In projects mode the agent switch is the install's only: a project
+    # that had cut the agent off keeps it off for every project.
+    if ("off",) in _rows(db_path, f"SELECT value FROM settings WHERE key = '{AGENT_ACCESS_KEY}'"):
+        await shared.set_setting(AGENT_ACCESS_KEY, "off")
     return copied, len(claims)
+
+
+def _busy(root: Path) -> str:
+    """Why init can't move files now, or ""."""
+    from sellbird import dashboard_instance
+    if loop_lock_held(root / "data" / "sellbird.lock"):
+        return "Sellbird is running. Stop it first, then run this again."
+    info = dashboard_instance.read(root / "data")
+    if info is not None and pid_alive(info.pid):
+        return "The dashboard is open. Stop `sellbird dashboard` first, then run this again."
+    return ""
+
+
+def _shared_files(root: Path) -> list[Path]:
+    return [root / "data" / f"shared.db{s}" for s in ("", "-wal", "-shm")]
+
+
+def _apply(root: Path, name: str, plan: dict) -> tuple[int, int]:
+    """Move everything into a temp folder, seed shared.db, then rename the
+    folder into place. Any failure puts every file back."""
+    folder = plan["folder"]
+    staging = folder.parent / f".init-{name}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    (staging / "data").mkdir(parents=True)
+    had_shared = [p for p in _shared_files(root) if p.exists()]
+    done: list[tuple[Path, Path]] = []
+    try:
+        for src, dst in plan["moves"]:
+            tmp = staging / dst.relative_to(folder)
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(tmp))
+            done.append((src, tmp))
+        db = staging / "data" / "sellbird.db" if plan["has_db"] else None
+        seeded = asyncio.run(_seed_shared(root, name, db))
+        load_config(str(staging / "sellbird.yaml"))    # refuse a config that won't load
+        staging.rename(folder)
+        return seeded
+    except BaseException:
+        for src, tmp in reversed(done):
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(tmp), str(src))
+        shutil.rmtree(staging, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            folder.parent.rmdir()       # projects/, if init made it
+        if not had_shared:
+            for p in _shared_files(root):
+                p.unlink(missing_ok=True)
+        raise
 
 
 def cmd_init(root: Path, name: str, apply: bool) -> int:
@@ -249,14 +322,15 @@ def cmd_init(root: Path, name: str, apply: bool) -> int:
     for src, dst in plan["moves"]:
         print(f"    {src.relative_to(root)}  ->  {dst.relative_to(root)}")
     print("  Staying at the root, shared by every project: .env, the mailbox tokens,\n"
-          "  the dashboard and agent tokens, prompts/ and skills/.")
+          "  the dashboard and agent tokens, prompts/ and the shipped skills.")
     print(f"  {'Creating' if apply else 'Would create'} data/shared.db with this install's "
-          "suppressions, and a claim on every company it has emailed.")
+          "suppressions, a claim on every company it has emailed, and its agent switch.")
     if not apply:
         print("\n  Nothing changed. Run again with --apply to do it.\n")
         return 0
-    if loop_lock_held(root / "data" / "sellbird.lock"):
-        print("\n  Sellbird is running. Stop it first, then run this again.\n")
+    busy = _busy(root)
+    if busy:
+        print(f"\n  {busy}\n")
         return 1
     db = root / "data" / "sellbird.db"
     if db.exists():
@@ -268,15 +342,33 @@ def cmd_init(root: Path, name: str, apply: bool) -> int:
             conn.close()
     backup = _backup(root, [src for src, _ in plan["moves"]])
     print(f"\n  Backup: {backup.relative_to(root)}")
-    (plan["folder"] / "data").mkdir(parents=True, exist_ok=True)
-    for src, dst in plan["moves"]:
-        shutil.move(str(src), str(dst))
-    moved_db = plan["folder"] / "data" / "sellbird.db" if plan["has_db"] else None
-    copied, claimed = asyncio.run(_seed_shared(root, name, moved_db))
+    try:
+        copied, claimed = _apply(root, name, plan)
+    except Exception as e:
+        print(f"  Couldn't finish, so every file is back where it was: {e}\n")
+        return 1
     print(f"  Shared: {copied} suppression(s) copied, {claimed} company claim(s) made.")
-    with use_home(projects.project_home(root, name)):
-        load_config()
     print(f"  Done. {name} is this install's first project; `sellbird run` runs it.\n")
+    return 0
+
+
+def cmd_reseed(root: Path) -> int:
+    """Copy every project's suppressions, claims and agent switch into
+    shared.db again (after a restore, say). Adds what's missing only."""
+    names = projects.discover(root)
+    if not names:
+        print("\n  No projects to reseed from.\n")
+        return 1
+    busy = _busy(root)
+    if busy:
+        print(f"\n  {busy}\n")
+        return 1
+    print()
+    for name in names:
+        db = Home.for_project(root, name).db_path
+        copied, claimed = asyncio.run(_seed_shared(root, name, db))
+        print(f"  {name}: {copied} suppression(s) added, {claimed} company claim(s) checked.")
+    print()
     return 0
 
 
@@ -294,7 +386,7 @@ def cmd_projects(args) -> None:
     from sellbird.paths import PROJECT_ROOT
     root = Path(PROJECT_ROOT)
     action = args.projects_action
-    if action in ("new", "init") and not args.value:
+    if action in ("new", "init") and not args.value and not getattr(args, "reseed", False):
         print(f"\n  Name the project: sellbird projects {action} NAME\n")
         sys.exit(2)
     try:
@@ -302,6 +394,8 @@ def cmd_projects(args) -> None:
             code = cmd_new(root, args.value)
         elif action == "check":
             code = cmd_check(root)
+        elif action == "init" and args.reseed:
+            code = cmd_reseed(root)
         elif action == "init":
             code = cmd_init(root, args.value, args.apply)
         elif action == "release":
@@ -326,4 +420,7 @@ def add_parser(subparsers) -> None:
                      help="new / init: the project's name; release: a domain")
     sub.add_argument("--apply", action="store_true",
                      help="init: do it (without this, init only says what it would do)")
+    sub.add_argument("--reseed", action="store_true",
+                     help="init: copy every project's suppressions, claims and agent switch "
+                          "into shared.db again; adds what's missing only")
     sub.set_defaults(func=cmd_projects)

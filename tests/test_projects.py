@@ -160,6 +160,25 @@ def test_knowledge_resolves_per_file(tmp_path):
         assert _read_knowledge("prompts", "writer") == "root writer"
 
 
+def test_new_project_reads_first_projects_trained_skill(tmp_path):
+    """The review's case: before `projects init`, training wrote the root's
+    skills/product_knowledge.md. A project must never sell what it says."""
+    from sellbird.brain import _read_knowledge
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "product_knowledge.md").write_text("We sell Product A.", encoding="utf-8")
+    (tmp_path / "skills" / "email_frameworks.md").write_text("Shared rules.", encoding="utf-8")
+    (tmp_path / "projects" / "segment-b").mkdir(parents=True)
+    with use_home(Home.for_project(tmp_path, "segment-b")):
+        assert _read_knowledge("skills", "product_knowledge") == ""      # not trained yet
+        assert _read_knowledge("skills", "email_frameworks") == "Shared rules."   # still shared
+        own = tmp_path / "projects" / "segment-b" / "skills"
+        own.mkdir()
+        (own / "product_knowledge.md").write_text("We sell Product B.", encoding="utf-8")
+        assert _read_knowledge("skills", "product_knowledge") == "We sell Product B."
+    with use_home(Home.for_root(tmp_path)):
+        assert _read_knowledge("skills", "product_knowledge") == "We sell Product A."
+
+
 def test_email_rules_resolve_per_file(tmp_path):
     from types import SimpleNamespace
     from sellbird.config import load_email_rules

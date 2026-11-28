@@ -77,10 +77,10 @@ async def _agent_is_off() -> bool:
 
 async def _agent_off_in(state) -> bool:
     """Whether the agent is cut off. In projects mode the switch is the
-    install's (every project shares the agent's token): off there, or off
-    in this project's own settings (from before projects), is off."""
-    if state.shared is not None and (await state.shared.get_setting(AGENT_ACCESS_KEY) or "") == "off":
-        return True
+    install's only, in shared.db (every project shares the agent's token;
+    `projects init` carries a switch that was off across)."""
+    if state.shared is not None:
+        return (await state.shared.get_setting(AGENT_ACCESS_KEY) or "") == "off"
     if not Path(state.db_path).exists():
         return False
     return (await state.get_setting(AGENT_ACCESS_KEY) or "") == "off"
@@ -485,11 +485,8 @@ async def get_setup_status():
     })
 
     # 6. Product trained
-    # In projects mode a project's own skills folder first, then the install's.
-    skill_dirs = [PROJECT_ROOT / "skills"]
-    if current_home().project:
-        skill_dirs.insert(0, Path(current_home().skills_dir))
-    product_trained = any((d / "product_knowledge.md").exists() for d in skill_dirs)
+    skills = Path(current_home().skills_dir) if current_home().project else PROJECT_ROOT / "skills"
+    product_trained = (skills / "product_knowledge.md").exists()
     checks.append({
         "id": "product_trained", "label": "Teach Sellbird your product",
         "done": product_trained,
@@ -1032,14 +1029,9 @@ async def get_company():
         await state.init_db()
         raw = await state.get_setting(PROPOSED_KEY)
         proposed = json.loads(raw) if raw else None
-        view = company_view(load_config(), current_home().root if current_home().project
+        # A project's training is in its own folder (TRAINED_SKILLS).
+        return company_view(load_config(), current_home().root if current_home().project
                             else PROJECT_ROOT, proposed)
-        if current_home().project:
-            # What training wrote is the project's own, else the install's.
-            shared = company_view(load_config(), PROJECT_ROOT, proposed)
-            for key in ("knowledge", "competitors"):
-                view[key] = view[key] or shared[key]
-        return view
     except Exception as e:
         return JSONResponse({"error": f"Couldn't read your config: {e}"}, status_code=500)
 
@@ -2409,8 +2401,6 @@ async def set_agent_access(request: Request):
     if state.shared is not None:
         # Projects mode: one switch for the whole install.
         await state.shared.set_setting(AGENT_ACCESS_KEY, "off" if access == "off" else "")
-        if access == "on":
-            await state.set_setting(AGENT_ACCESS_KEY, "")
     else:
         await state.set_setting(AGENT_ACCESS_KEY, "off" if access == "off" else "")
     signed_out = pane_sessions.sign_out_all() if access == "off" else 0

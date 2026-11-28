@@ -34,7 +34,11 @@ async def single_install(root: Path) -> None:
     (root / ".env").write_text("SMTP_HOST=smtp.example.com\n", encoding="utf-8")
     (root / "sellbird.yaml").write_text(TEMPLATE, encoding="utf-8")            # the template
     (root / "sellbird.local.yaml").write_text(trained("Example Roofing"), encoding="utf-8")
-    (root / "example-extension.yaml").write_text("enabled: true\n", encoding="utf-8")
+    (root / "sellbird.example-extension.yaml").write_text("enabled: true\n", encoding="utf-8")
+    (root / "compose.yaml").write_text("services: {}\n", encoding="utf-8")   # not Sellbird's
+    (root / "skills").mkdir()
+    (root / "skills" / "product_knowledge.md").write_text("We sell roofing.", encoding="utf-8")
+    (root / "skills" / "email_frameworks.md").write_text("Shared rules.", encoding="utf-8")
     data = root / "data"
     data.mkdir()
     for name in ("gmail_token.json", "dashboard-token", "agent-token"):
@@ -57,7 +61,10 @@ def test_init_dry_run_changes_nothing(tmp_path, capsys):
     assert tree(tmp_path) == before
     out = capsys.readouterr().out
     assert "sellbird.local.yaml  ->  projects/product-a/sellbird.yaml" in out
-    assert "example-extension.yaml  ->  projects/product-a/example-extension.yaml" in out
+    assert ("sellbird.example-extension.yaml  ->  "
+            "projects/product-a/sellbird.example-extension.yaml") in out
+    assert "skills/product_knowledge.md  ->  projects/product-a/skills/product_knowledge.md" in out
+    assert "compose.yaml" not in out.replace("sellbird.example-extension.yaml", "")
     assert "data/sellbird.db  ->  projects/product-a/data/sellbird.db" in out
     assert "Nothing changed" in out
 
@@ -69,10 +76,14 @@ def test_init_apply_makes_the_first_project(tmp_path):
 
     # Moved.
     assert (folder / "sellbird.yaml").read_text(encoding="utf-8") == trained("Example Roofing")
-    assert (folder / "example-extension.yaml").exists()
+    assert (folder / "sellbird.example-extension.yaml").exists()
+    assert (folder / "skills" / "product_knowledge.md").read_text(encoding="utf-8") == "We sell roofing."
     assert (folder / "data" / "sellbird.db").exists()
     assert not (tmp_path / "sellbird.local.yaml").exists()
-    assert not (tmp_path / "example-extension.yaml").exists()
+    assert not (tmp_path / "sellbird.example-extension.yaml").exists()
+    assert not (tmp_path / "skills" / "product_knowledge.md").exists()
+    assert (tmp_path / "compose.yaml").exists()
+    assert (tmp_path / "skills" / "email_frameworks.md").exists()      # shared
     assert not (tmp_path / "data" / "sellbird.db").exists()
     # Kept at the root.
     assert (tmp_path / "sellbird.yaml").read_text(encoding="utf-8") == TEMPLATE
@@ -83,7 +94,8 @@ def test_init_apply_makes_the_first_project(tmp_path):
     [backup] = (tmp_path / "data").glob("backup-*.tar.gz")
     with tarfile.open(backup) as tar:
         names = set(tar.getnames())
-    assert {"sellbird.local.yaml", "example-extension.yaml", "data/sellbird.db"} <= names
+    assert {"sellbird.local.yaml", "sellbird.example-extension.yaml", "data/sellbird.db",
+            "skills/product_knowledge.md"} <= names
 
     # A working home, with the shared layer seeded.
     assert projects.discover(tmp_path) == ["product-a"]
@@ -112,6 +124,81 @@ def test_init_refuses_while_the_loop_runs(tmp_path, capsys):
     after = tree(tmp_path)
     after.pop("data/sellbird.lock", None)
     assert after == before
+
+
+def test_init_refuses_while_the_dashboard_is_open(tmp_path, capsys):
+    import os
+    from sellbird import dashboard_instance
+    asyncio.run(single_install(tmp_path))
+    dashboard_instance.write(tmp_path / "data", host="127.0.0.1", port=5555, instance="x")
+    before = tree(tmp_path)
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 1
+    assert "dashboard is open" in capsys.readouterr().out
+    assert tree(tmp_path) == before
+    # A file left by a dashboard that's gone doesn't block.
+    dashboard_instance.write(tmp_path / "data", host="127.0.0.1", port=5555, instance="x")
+    raw = (tmp_path / "data" / "dashboard.json").read_text(encoding="utf-8")
+    (tmp_path / "data" / "dashboard.json").write_text(
+        raw.replace(f'"pid": {os.getpid()}', '"pid": 999999'), encoding="utf-8")
+    assert projects_cli._busy(tmp_path) == ""
+
+
+def test_init_puts_every_file_back_when_a_step_fails(tmp_path, monkeypatch, capsys):
+    asyncio.run(single_install(tmp_path))
+    before = tree(tmp_path)
+
+    async def broken(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(projects_cli, "_seed_shared", broken)
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 1
+    assert "every file is back" in capsys.readouterr().out
+    after = tree(tmp_path)
+    [backup] = [k for k in after if k.startswith("data/backup-")]
+    after.pop(backup)
+    assert after == before
+    assert not (tmp_path / "projects").exists()
+    assert not (tmp_path / "data" / "shared.db").exists()
+    assert projects.discover(tmp_path) == []
+
+
+def test_init_backs_up_a_symlinked_config_as_its_contents(tmp_path):
+    asyncio.run(single_install(tmp_path))
+    real = tmp_path / "elsewhere.txt"
+    (tmp_path / "sellbird.local.yaml").rename(real)
+    (tmp_path / "sellbird.local.yaml").symlink_to(real)
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 0
+    [backup] = (tmp_path / "data").glob("backup-*.tar.gz")
+    with tarfile.open(backup) as tar:
+        member = tar.getmember("sellbird.local.yaml")
+        assert member.isfile()
+        assert b"Example Roofing" in tar.extractfile(member).read()
+
+
+def test_init_carries_the_agent_switch_and_reseed_adds_whats_missing(tmp_path, capsys):
+    from sellbird.dashboard import AGENT_ACCESS_KEY
+    asyncio.run(single_install(tmp_path))
+
+    async def switch_off():
+        await StateManager(str(tmp_path / "data" / "sellbird.db")).set_setting(AGENT_ACCESS_KEY, "off")
+    asyncio.run(switch_off())
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 0
+    shared = SharedState(tmp_path / "data")
+    assert asyncio.run(shared.get_setting(AGENT_ACCESS_KEY)) == "off"
+
+    # shared.db lost (a restore, say): --reseed brings it back, and twice is the same as once.
+    for f in tmp_path.joinpath("data").glob("shared.db*"):
+        f.unlink()
+    assert projects_cli.cmd_reseed(tmp_path) == 0
+    assert projects_cli.cmd_reseed(tmp_path) == 0
+
+    async def check():
+        claims = await shared.list_claims()
+        assert [(c["domain"], c["project"]) for c in claims] == [("acme.example", "product-a")]
+        assert await shared.get_setting(AGENT_ACCESS_KEY) == "off"
+        with use_home(projects.project_home(tmp_path, "product-a")):
+            assert len(await StateManager().list_suppressions()) == 1
+    asyncio.run(check())
+    assert "product-a: 0 suppression(s) added" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("why", ["untrained", "has_projects", "bad_name"])

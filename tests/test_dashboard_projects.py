@@ -368,8 +368,16 @@ def test_setup_status_looks_for_the_projects_own_training(client, install):
     assert trained("alpha") is True and trained("beta") is False
     root_skills = install / "skills"
     root_skills.mkdir()
-    (root_skills / "product_knowledge.md").write_text("# Shared\n", encoding="utf-8")
-    assert trained("beta") is True        # the install's copy counts for every project
+    (root_skills / "product_knowledge.md").write_text("# Product A\n", encoding="utf-8")
+    assert trained("beta") is False       # training is a project's own, never the root's
+
+    # Your company shows only the project's own training.
+    from tests.test_projects_run import trained as trained_config
+    for name in ("alpha", "beta"):
+        (install / "projects" / name / "sellbird.yaml").write_text(
+            trained_config("Example Co"), encoding="utf-8")
+    assert client.get("/api/company", headers={HEADER: "beta"}).json()["knowledge"] == ""
+    assert "Example product" in client.get("/api/company", headers={HEADER: "alpha"}).json()["knowledge"]
 
 
 # ── The MCP server pinned to a project ──
@@ -456,15 +464,19 @@ def test_turning_the_agent_off_in_one_project_cuts_it_off_in_every_project(agent
     assert {d["to_email"].split("-")[0] for d in out["pending"]} == {"alpha"}
 
 
-def test_a_projects_own_switch_from_before_projects_still_holds_until_turned_on(agent, client, install):
+def test_in_projects_mode_only_the_installs_switch_counts(agent, client, install):
+    """A project's own leftover switch is ignored: `projects init` carries an
+    off switch into shared.db, and from then on there is one switch."""
     asyncio.run(StateManager(str(_db(install, "beta"))).set_setting(dash.AGENT_ACCESS_KEY, "off"))
     out, _ = _agent_call(agent, "beta")
-    assert out["status"] == 403
-    out, _ = _agent_call(agent, "alpha")
-    assert out.get("ok", True) is not False
-    client.post("/api/agent/access", json={"access": "on"}, headers={HEADER: "beta"})
-    out, _ = _agent_call(agent, "beta")
     assert {d["to_email"].split("-")[0] for d in out["pending"]} == {"beta"}
+    client.post("/api/agent/access", json={"access": "off"}, headers={HEADER: "alpha"})
+    for project in ("alpha", "beta"):
+        out, _ = _agent_call(agent, project)
+        assert out["status"] == 403
+    client.post("/api/agent/access", json={"access": "on"}, headers={HEADER: "beta"})
+    out, _ = _agent_call(agent, "alpha")
+    assert {d["to_email"].split("-")[0] for d in out["pending"]} == {"alpha"}
 
 
 def test_sellbird_mcp_project_pins_the_server(monkeypatch):

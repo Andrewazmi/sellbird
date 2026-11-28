@@ -10,6 +10,7 @@ code.
 
 import re
 import unicodedata
+from pathlib import Path
 from dataclasses import dataclass, field
 
 # Spam-filter and AI-tell phrases that must never appear in outgoing mail.
@@ -419,12 +420,22 @@ def _words(text: str) -> list[str]:
     return _WORD_RE.findall((text or "").lower())
 
 
-def _instruction_runs(root) -> dict[tuple, str]:
+def _instruction_folders(root=None) -> list:
+    """The prompts and skills folders the agents read: ``root``'s, or the
+    current home's (a project's own, then the root's)."""
+    from sellbird.workspace_home import current_home
+    if root is not None:
+        return [root / "prompts", root / "skills"]
+    home = current_home()
+    return [*home.knowledge_dirs("prompts"), *home.knowledge_dirs("skills")]
+
+
+def _instruction_runs(folders) -> dict[tuple, str]:
     """Every LEAK_RUN_WORDS-word run in Sellbird's instructions → its file."""
     from sellbird.untrusted import UNTRUSTED_RULE
-    files = sorted(p for folder in ("prompts", "skills") for p in (root / folder).glob("*.md")
+    files = sorted(p for folder in folders for p in Path(folder).glob("*.md")
                    if p.name not in _SAY_ALOUD_FILES)
-    key = (str(root), tuple((str(p), p.stat().st_mtime_ns) for p in files))
+    key = (tuple(map(str, folders)), tuple((str(p), p.stat().st_mtime_ns) for p in files))
     if _leak_cache.get("key") != key:
         runs: dict[tuple, str] = {}
         sources = [(p.name, _QUOTED_RE.sub(" | ", "\n".join(
@@ -496,7 +507,6 @@ def autopilot_review(subject: str, body: str, config, root=None, recipient: str 
     or get Sellbird to quote its own instructions back.
     ``recipient``'s own domain is fine to mention to them ("saw
     joesroofing.com"): it's theirs."""
-    from sellbird.paths import PROJECT_ROOT
     reasons: list[str] = []
     text = f"{subject or ''}\n{body or ''}"
     allowed = allowed_link_domains(config)
@@ -520,7 +530,7 @@ def autopilot_review(subject: str, body: str, config, root=None, recipient: str 
     if payment:
         reasons.append(f"asks about sending money (\"{payment.group(0)}\")")
     words = _words(text)
-    runs = _instruction_runs(root or PROJECT_ROOT)
+    runs = _instruction_runs(_instruction_folders(root))
     for i in range(len(words) - LEAK_RUN_WORDS + 1):
         source = runs.get(tuple(words[i:i + LEAK_RUN_WORDS]))
         if source:
