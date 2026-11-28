@@ -30,7 +30,7 @@ MAX_OBJECTION_ATTEMPTS = 3
 from sellbird.paths import PROJECT_ROOT
 from sellbird.textio import read_user_text
 from sellbird.untrusted import UNTRUSTED_RULE, fence
-from sellbird.workspace_home import _HOME
+from sellbird.workspace_home import _HOME, config_target
 
 
 def _skills_dir() -> Path:
@@ -567,14 +567,7 @@ class Trainer:
 
         # Write config (relative paths resolve against the project root,
         # so training works no matter what directory it's launched from)
-        config_path = Path(output_path)
-        home = _HOME.get()
-        project = home if home is not None and home.project else None
-        if project is not None:
-            # A project's config is its own sellbird.yaml (sellbird.projects).
-            config_path = project.config_file
-        elif not config_path.is_absolute():
-            config_path = PROJECT_ROOT / config_path
+        config_path = config_target(PROJECT_ROOT / output_path)
         guessed_email = config["persona"]["email"]
         config = write_trained_config(config, config_path)
 

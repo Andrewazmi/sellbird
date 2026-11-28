@@ -87,12 +87,9 @@ def _config_file() -> Path:
     wins over sellbird.yaml when it exists, as in config._find_config_file.
     Setup reads and writes this file, so its answers are the ones Sellbird uses.
     A project (sellbird.projects) has just its own sellbird.yaml."""
-    from sellbird.workspace_home import _HOME
-    home = _HOME.get()
-    if home is not None and home.project:
-        return home.config_file
+    from sellbird.workspace_home import config_target
     local = CONFIG_FILE.with_name("sellbird.local.yaml")
-    return local if local.exists() else CONFIG_FILE
+    return config_target(local if local.exists() else CONFIG_FILE)
 
 
 def _current_precleared() -> dict:

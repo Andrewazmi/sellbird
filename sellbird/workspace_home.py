@@ -98,6 +98,14 @@ class Home:
         return dirs
 
 
+def config_target(default: Path) -> Path:
+    """The config file to read and write: a project's own sellbird.yaml (its
+    only one, never a tracked template), else ``default``. One place for
+    setup, the dashboard's offer and training."""
+    home = _HOME.get()
+    return home.config_file if home is not None and home.project else Path(default)
+
+
 # The skills `sellbird train` writes (trainer.py); never shipped.
 TRAINED_SKILLS = ("product_knowledge", "competitive_intel")
 

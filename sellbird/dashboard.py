@@ -931,12 +931,9 @@ def _offer_config_file() -> Path:
     """Where the offer is saved. The tracked sellbird.yaml template stays
     untrained: your offer goes in the gitignored sellbird.local.yaml, which
     then holds your whole config (as `sellbird train` does)."""
-    target = _resolve_config_file()
-    if current_home().project:
-        # A project's sellbird.yaml is its own, the only file it reads (never
-        # a tracked template), so the offer goes there.
-        return target
-    if target.name == "sellbird.yaml":
+    from sellbird.workspace_home import config_target
+    target = config_target(_resolve_config_file())
+    if target.name == "sellbird.yaml" and not current_home().project:
         local = target.with_name("sellbird.local.yaml")
         if not local.exists():
             shutil.copyfile(target, local)
@@ -2203,19 +2200,28 @@ SUPPRESSIONS_SHOWN = 500
 
 async def _suppression_counts(state) -> list[dict]:
     """How many people are suppressed, by reason. In projects mode an opt-out
-    in any project stops every project, so the shared list counts too (a
-    person on both lists once)."""
+    in any project stops every project, so the shared list counts too: one
+    GROUP BY over both lists, a person on both counted once (shared wins)."""
+    by_reason = "SELECT reason, COUNT(*) AS n FROM {} GROUP BY reason"
     if state.shared is None:
-        return await query_db("SELECT reason, COUNT(*) AS n FROM suppressions GROUP BY reason")
-    own = await query_db("SELECT kind, value, reason FROM suppressions")
-    seen: dict[tuple, str] = {(r["kind"], r["value"]): r["reason"] for r in own}
-    # The shared list wins where both name someone.
-    for r in await state.shared.list_suppressions(limit=2_000_000_000):
-        seen[(r["kind"], r["value"])] = r["reason"]
-    tally: dict[str, int] = {}
-    for reason in seen.values():
-        tally[reason] = tally.get(reason, 0) + 1
-    return [{"reason": k, "n": v} for k, v in tally.items()]
+        return await query_db(by_reason.format("suppressions"))
+    await state.shared.init_db()
+    own = _db_path()
+    rows = "suppressions"
+    if own.exists():
+        rows = """(SELECT reason FROM main.suppressions UNION ALL
+                   SELECT s.reason FROM own.suppressions s WHERE NOT EXISTS (
+                     SELECT 1 FROM main.suppressions x WHERE x.kind = s.kind AND x.value = s.value))"""
+    try:
+        async with storage.connect(str(state.shared.db_path)) as db:
+            db.row_factory = aiosqlite.Row
+            if own.exists():
+                await db.execute("ATTACH DATABASE ? AS own", (str(own),))
+            async with db.execute(by_reason.format(rows)) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+    except Exception as e:
+        logger.warning(f"Couldn't count suppressions: {e}")
+        return []
 
 
 @app.post("/api/suppressions")
