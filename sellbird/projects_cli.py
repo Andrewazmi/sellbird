@@ -278,6 +278,18 @@ def _shared_files(root: Path) -> list[Path]:
     return [root / "data" / f"shared.db{s}" for s in ("", "-wal", "-shm")]
 
 
+def _set_default(settings: Path, name: str) -> None:
+    """Make the first project the dashboard's default, so a project added
+    later (empty, maybe first in the alphabet) doesn't open instead. Never
+    replaces a default already set; appends, so comments stay."""
+    text = read_user_text(settings) if settings.exists() else ""
+    if "default" in (yaml.safe_load(text) or {}):
+        return
+    line = f"default: {name}            # the dashboard opens this one first\n"
+    settings.write_text(text + ("\n" if text and not text.endswith("\n") else "") + line,
+                        encoding="utf-8")
+
+
 def _apply(root: Path, name: str, plan: dict) -> tuple[int, int]:
     """Move everything into a temp folder, seed shared.db, then rename the
     folder into place. Any failure puts every file back."""
@@ -287,6 +299,8 @@ def _apply(root: Path, name: str, plan: dict) -> tuple[int, int]:
         shutil.rmtree(staging)
     (staging / "data").mkdir(parents=True)
     had_shared = [p for p in _shared_files(root) if p.exists()]
+    settings = root / projects.SETTINGS_FILE
+    settings_before = settings.read_bytes() if settings.exists() else None
     done: list[tuple[Path, Path]] = []
     try:
         for src, dst in plan["moves"]:
@@ -297,6 +311,7 @@ def _apply(root: Path, name: str, plan: dict) -> tuple[int, int]:
         db = staging / "data" / "sellbird.db" if plan["has_db"] else None
         seeded = asyncio.run(_seed_shared(root, name, db))
         load_config(str(staging / "sellbird.yaml"))    # refuse a config that won't load
+        _set_default(settings, name)
         staging.rename(folder)
         return seeded
     except BaseException:
@@ -304,6 +319,10 @@ def _apply(root: Path, name: str, plan: dict) -> tuple[int, int]:
             src.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp), str(src))
         shutil.rmtree(staging, ignore_errors=True)
+        if settings_before is None:
+            settings.unlink(missing_ok=True)
+        else:
+            settings.write_bytes(settings_before)
         with contextlib.suppress(OSError):
             folder.parent.rmdir()       # projects/, if init made it
         if not had_shared:

@@ -339,6 +339,25 @@ def test_suppression_counts_include_the_shared_list(client, install):
     assert other["counts"] == {"opted_out": 1, "bounced": 1} and other["total"] == 2
 
 
+def test_signals_to_confirm_are_each_projects_own(client, install):
+    """A new project's own database seeds the catalog as proposed; what
+    another project confirmed never shows there (seen live: 29 to confirm in
+    a new project beside 26 confirmed in the first)."""
+    for name in ("alpha", "beta"):         # the Signals screen seeds its project's catalog
+        assert client.get("/api/signals", headers={HEADER: name}).status_code == 200
+    with sqlite3.connect(_db(install, "alpha")) as conn:
+        conn.execute("UPDATE signal_codes SET status = 'confirmed'")
+    conn.close()
+
+    def signals(project):
+        checks = client.get("/api/setup-status", headers={HEADER: project}).json()["checks"]
+        return next(c for c in checks if c["id"] == "signals")
+    a, b = signals("alpha"), signals("beta")
+    assert a["confirmed"] > 0 and a["proposed"] == 0
+    assert b["confirmed"] == 0 and b["proposed"] == a["confirmed"]
+    assert not (install / "data" / "sellbird.db").exists()      # never the root's
+
+
 def test_a_discovery_run_in_one_project_is_not_shown_in_another(client):
     dash._discovery_runs["alpha"] = {"task": None, "report": {"profiled_companies": 7}, "kind": "profile"}
     a = client.get("/api/discover/providers", headers={HEADER: "alpha"}).json()

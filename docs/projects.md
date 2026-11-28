@@ -307,11 +307,14 @@ backed up as its contents), then:
    `company_claims` from every company the project has emailed, dated by its
    last send (for mail sent through Instantly, which has no Outbox rows, by
    the prospect's last update), and carries the agent switch if it was off;
-3. checks that the moved config loads, then renames the folder to
-   `projects/NAME/`, which is when it becomes a project.
+3. checks that the moved config loads, writes `default: NAME` to
+   `sellbird.projects.yaml` (creating it if needed; a `default` already
+   there is kept), then renames the folder to `projects/NAME/`, which is
+   when it becomes a project. Without the default, a project added later
+   that sorts first would be where the dashboard opens.
 
-If any step fails, every file goes back where it was and a `shared.db` that
-`init` created is removed. `.env`, the mailbox tokens, the dashboard and
+If any step fails, every file goes back where it was, `sellbird.projects.yaml`
+is restored, and a `shared.db` that `init` created is removed. `.env`, the mailbox tokens, the dashboard and
 agent tokens, `prompts/` and the shipped skills stay at the root. When
 `sellbird.local.yaml` is the config, the tracked `sellbird.yaml` template
 stays at the root too.

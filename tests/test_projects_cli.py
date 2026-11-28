@@ -158,6 +158,7 @@ def test_init_puts_every_file_back_when_a_step_fails(tmp_path, monkeypatch, caps
     assert after == before
     assert not (tmp_path / "projects").exists()
     assert not (tmp_path / "data" / "shared.db").exists()
+    assert not (tmp_path / "sellbird.projects.yaml").exists()
     assert projects.discover(tmp_path) == []
 
 
@@ -199,6 +200,32 @@ def test_init_carries_the_agent_switch_and_reseed_adds_whats_missing(tmp_path, c
             assert len(await StateManager().list_suppressions()) == 1
     asyncio.run(check())
     assert "product-a: 0 suppression(s) added" in capsys.readouterr().out
+
+
+def test_init_makes_the_first_project_the_default(tmp_path):
+    """A project added later, empty and first in the alphabet, must not be
+    where the dashboard opens."""
+    asyncio.run(single_install(tmp_path))
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 0
+    assert projects_cli.cmd_new(tmp_path, "an-empty-one") == 0
+    assert projects.default_project(tmp_path) == "product-a"
+
+
+def test_init_keeps_a_default_already_set(tmp_path):
+    asyncio.run(single_install(tmp_path))
+    settings = tmp_path / "sellbird.projects.yaml"
+    settings.write_text("# mine\ndefault: segment-b\ninbox_daily_cap: 40\n", encoding="utf-8")
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 0
+    assert settings.read_text(encoding="utf-8") == "# mine\ndefault: segment-b\ninbox_daily_cap: 40\n"
+
+
+def test_init_adds_the_default_beside_other_settings(tmp_path):
+    asyncio.run(single_install(tmp_path))
+    settings = tmp_path / "sellbird.projects.yaml"
+    settings.write_text("inbox_daily_cap: 40", encoding="utf-8")
+    assert projects_cli.cmd_init(tmp_path, "product-a", apply=True) == 0
+    assert projects.load_settings(tmp_path).default == "product-a"
+    assert projects.load_settings(tmp_path).inbox_daily_cap == 40
 
 
 @pytest.mark.parametrize("why", ["untrained", "has_projects", "bad_name"])
