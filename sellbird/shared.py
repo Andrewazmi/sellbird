@@ -174,13 +174,23 @@ class SharedState:
 
     async def holder(self, domain: str, days: int, at: datetime | None = None) -> str | None:
         """The project with an active claim on ``domain``, or None."""
+        return (await self.holders([domain], days, at)).get(domain)
+
+    async def holders(self, domains: list[str], days: int,
+                      at: datetime | None = None) -> dict[str, str]:
+        """{domain: project} for each of ``domains`` with an active claim."""
         lapsed = _iso((at or _utcnow()) - timedelta(days=days))
+        found: dict[str, str] = {}
+        unique = sorted(set(d for d in domains if d))
         async with self._connect() as db:
-            async with db.execute(
-                    "SELECT project FROM company_claims WHERE domain = ? AND last_touch_at >= ?",
-                    (domain, lapsed)) as cursor:
-                row = await cursor.fetchone()
-        return row[0] if row else None
+            for start in range(0, len(unique), 500):
+                chunk = unique[start:start + 500]
+                marks = ",".join("?" for _ in chunk)
+                async with db.execute(
+                        f"SELECT domain, project FROM company_claims WHERE domain IN ({marks})"
+                        " AND last_touch_at >= ?", (*chunk, lapsed)) as cursor:
+                    found.update({d: p for d, p in await cursor.fetchall()})
+        return found
 
     async def touch(self, domain: str, project: str, at: datetime | None = None) -> None:
         """Renew ``project``'s own claim (a reply came in). Nobody else's."""
@@ -199,9 +209,12 @@ class SharedState:
                 " VALUES (?, ?, ?, ?)", (domain, project, _iso(at), _iso(at)))
             await db.commit()
 
-    async def release(self, domain: str) -> bool:
+    async def release(self, domain: str, project: str | None = None) -> bool:
+        """End a claim; with ``project``, only that project's."""
+        where, params = ("domain = ?", (domain,)) if project is None else \
+            ("domain = ? AND project = ?", (domain, project))
         async with self._connect() as db:
-            cursor = await db.execute("DELETE FROM company_claims WHERE domain = ?", (domain,))
+            cursor = await db.execute(f"DELETE FROM company_claims WHERE {where}", params)
             await db.commit()
             return cursor.rowcount > 0
 
@@ -268,15 +281,37 @@ async def claimed_elsewhere(state, prospect) -> str | None:
     return holder if holder and holder != state.project else None
 
 
-async def claim_company(state, prospect) -> str | None:
-    """Claim (or renew) this prospect's company for this project, before a
-    cold email. None when this project may send; else the project holding it."""
+async def claimed_elsewhere_ids(state, prospects) -> set[str]:
+    """The ids of ``prospects`` whose company another project is in touch
+    with, in one shared.db query (the Writer's batch)."""
+    if state.shared is None or not prospects:
+        return set()
+    keys = {p.id: await company_key(state, p) for p in prospects}
+    held = await state.shared.holders(list(keys.values()), _settings(state).company_claim_days)
+    return {pid for pid, key in keys.items() if key and held.get(key, state.project) != state.project}
+
+
+async def claim_company(state, prospect) -> tuple[str | None, str]:
+    """Claim (or renew) this prospect's company for this project, as a cold
+    email is about to leave. Returns (holder, fresh): holder is None when
+    this project may send, else the project holding it; fresh is the
+    company's key when the claim is new, so a send that fails can give it
+    back (``release_fresh_claim``), else ""."""
     if state.shared is None:
-        return None
+        return None, ""
     key = await company_key(state, prospect)
     if not key:
-        return None
-    return await state.shared.claim(key, state.project, _settings(state).company_claim_days)
+        return None, ""
+    days = _settings(state).company_claim_days
+    before = await state.shared.holder(key, days)
+    holder = await state.shared.claim(key, state.project, days)
+    return holder, (key if holder is None and before is None else "")
+
+
+async def release_fresh_claim(state, key: str) -> None:
+    """Nothing left: give back a claim this send had just taken."""
+    if state.shared is not None and key:
+        await state.shared.release(key, state.project)
 
 
 async def renew_claim(state, prospect) -> None:

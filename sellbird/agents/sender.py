@@ -35,7 +35,7 @@ from sellbird.integrations.signature import signature_problem
 from sellbird.email_style import style_problems
 from sellbird.mailboxes import Inboxes, load_inboxes
 from sellbird.sending_mode import SIGNATURE_HOLD_PREFIX, sync_sending_mode
-from sellbird.shared import claim_company
+from sellbird.shared import claim_company, claimed_elsewhere, release_fresh_claim
 from sellbird.state import (
     AUTOPILOT_OFF_REASON, CLAIM_HOLD_PREFIX, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
     MANUAL_SEND_KEY, MAYBE_SENT_PREFIX, MOVED_BACK_PREFIXES, RECHECK_PREFIX,
@@ -1028,9 +1028,9 @@ class Sender:
             elif item["kind"] == "sequence" and sent_cold >= cold_left:
                 held_cold += 1
                 continue
-            address = inbox.address if inbox is not None else main_address
+            sending_address = inbox.address if inbox is not None else main_address
             if (shared_cap and item["kind"] == "sequence"
-                    and await self.state.shared.inbox_sent_since(address, since_midnight) >= shared_cap):
+                    and await self.state.shared.inbox_sent_since(sending_address, since_midnight) >= shared_cap):
                 held_shared += 1
                 continue
             needs_check = self.precleared is not None and item["kind"] == "sequence"
@@ -1163,10 +1163,11 @@ class Sender:
                         outside_window += 1
                         continue
 
-            # Projects mode: a cold email claims its company for this
-            # project, or waits while another project is in touch with it.
+            # Projects mode: a cold email waits while another project is in
+            # touch with its company (it claims the company only as it
+            # leaves, below).
             if item["kind"] == "sequence":
-                holder = await claim_company(self.state, prospect)
+                holder = await claimed_elsewhere(self.state, prospect)
                 if holder:
                     await self._retry_later(item, f"project {holder} holds it",
                                             after=CLAIM_RETRY_AFTER, prefix=CLAIM_HOLD_PREFIX)
@@ -1204,13 +1205,22 @@ class Sender:
                                                     error=f"held: {NO_HEADERS_HOLD}")
                 continue
             extra = {"headers": headers} if headers else {}
-            # Projects mode: take this inbox's place for today, across every
-            # project, in one statement; given back if the email never left.
-            ledger = None
+            # Projects mode: claim the company, and take this inbox's place
+            # for today across every project, each in one statement. Both go
+            # back if the email never left.
+            ledger, fresh_claim = None, ""
             if self.state.shared is not None and item["kind"] == "sequence":
+                holder, fresh_claim = await claim_company(self.state, prospect)
+                if holder:      # another project got there since the check above
+                    await self.state.update_outbox_item(item["id"], status="approved")
+                    await self._retry_later(item, f"project {holder} holds it",
+                                            after=CLAIM_RETRY_AFTER, prefix=CLAIM_HOLD_PREFIX)
+                    held_claimed += 1
+                    continue
                 ledger = await self.state.shared.reserve_inbox_send(
-                    address, self.state.project, shared_cap, since_midnight)
+                    sending_address, self.state.project, shared_cap, since_midnight)
                 if ledger is None:
+                    await release_fresh_claim(self.state, fresh_claim)
                     await self.state.update_outbox_item(item["id"], status="approved")
                     held_shared += 1
                     continue
@@ -1231,6 +1241,7 @@ class Sender:
                 continue
             if ledger is not None and not result.ok and not getattr(result, "uncertain", False):
                 await self.state.shared.unreserve_inbox_send(ledger)
+                await release_fresh_claim(self.state, fresh_claim)
             if not result.ok and result.error.startswith("signature:"):
                 # The logo broke after this drain checked it, and the provider
                 # refused before sending: this email waits, like the others.

@@ -1867,7 +1867,6 @@ Respond ONLY with the JSON array."""
         geo = self.config.icp.geography[0] if self.config.icp.geography else ""
 
         logger.info(f"Scout: Searching job boards for '{search_term}' roles...")
-        loop = asyncio.get_event_loop()
 
         def _search():
             return scrape_jobs(
@@ -1880,7 +1879,7 @@ Respond ONLY with the JSON array."""
 
         try:
             df = await asyncio.wait_for(
-                loop.run_in_executor(None, _search), timeout=120
+                asyncio.to_thread(_search), timeout=120
             )
         except Exception as e:
             logger.warning(f"Scout: job-board search failed: {e}")

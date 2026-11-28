@@ -144,9 +144,10 @@ class SmtpImapProvider(MailProvider):
         return SendResult(ok=True, message_id=message_id, thread_ref=message_id)
 
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
-        loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, self._fetch_unseen, limit)
+            # to_thread, not run_in_executor: it carries the project's home
+            # into the thread, which decides how the fetch reads the inbox.
+            return await asyncio.to_thread(self._fetch_unseen, limit)
         except Exception as e:
             logger.error(f"IMAP fetch failed: {e}")
             return []
@@ -232,7 +233,6 @@ class SmtpImapProvider(MailProvider):
         except Exception as e:
             return False, f"SMTP login failed: {str(e)[:200]}"
         # IMAP handshake
-        loop = asyncio.get_event_loop()
 
         def _imap_check():
             conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
@@ -245,7 +245,7 @@ class SmtpImapProvider(MailProvider):
                     pass
 
         try:
-            await loop.run_in_executor(None, _imap_check)
+            await asyncio.to_thread(_imap_check)
         except Exception as e:
             return False, f"SMTP OK but IMAP login failed: {str(e)[:200]}"
         return True, f"SMTP + IMAP connected as {self.smtp_user}"

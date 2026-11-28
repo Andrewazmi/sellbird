@@ -232,6 +232,90 @@ async def test_reserving_the_last_place_has_one_winner(tmp_path):
     assert sum(g is not None for g in got) == 2
 
 
+@pytest.mark.asyncio
+async def test_the_inbox_cap_holds_with_the_cold_email_check_on(root):
+    """The Precleared check names the recipient: the ledger still counts the
+    sending inbox (review B1)."""
+    from tests.test_precleared import OK_BODY, mock_status, with_check
+    (root / "sellbird.projects.yaml").write_text("inbox_daily_cap: 1\n", encoding="utf-8")
+    a, b = Project(root, "product-a"), Project(root, "segment-b")
+    await a.prospect(email="pat@acme.example", domain="acme.example")
+    await b.prospect(email="sam@other.example", domain="other.example")
+    for p in (a, b):
+        with use_home(p.home):
+            s = with_check(make_sender(p.state, p.provider, require_approval=False),
+                           mock_status(200, OK_BODY))
+            await s._run_native()
+    assert len(a.provider.sent) + len(b.provider.sent) == 1
+    shared = SharedState(root / "data")
+    assert await shared.inbox_sent_since("sellbird@x.co", "2000-01-01") == 1
+    assert await shared.inbox_sent_since("pat@acme.example", "2000-01-01") == 0
+
+
+@pytest.mark.asyncio
+async def test_a_send_that_fails_gives_a_fresh_claim_back(root):
+    """A claim is taken as the email leaves; nothing left, nothing held (review I7)."""
+    a = Project(root, "product-a")
+    await a.prospect()
+    a.provider.fail_next = True
+    await a.send()
+    assert await SharedState(root / "data").list_claims() == []
+
+
+@pytest.mark.asyncio
+async def test_a_held_email_claims_nothing(root):
+    """An email the shared cap holds never claims its company."""
+    (root / "sellbird.projects.yaml").write_text("inbox_daily_cap: 1\n", encoding="utf-8")
+    a, b = Project(root, "product-a"), Project(root, "segment-b")
+    await a.prospect(email="pat@acme.example", domain="acme.example")
+    await b.prospect(email="sam@other.example", domain="other.example")
+    await a.send()
+    await b.send()
+    claims = await SharedState(root / "data").list_claims()
+    assert [(c["domain"], c["project"]) for c in claims] == [("acme.example", "product-a")]
+
+
+@pytest.mark.asyncio
+async def test_a_renewed_claim_stays_when_a_send_fails(root):
+    a = Project(root, "product-a")
+    await a.prospect()
+    shared = SharedState(root / "data")
+    await shared.claim("acme.example", "product-a", 60)
+    a.provider.fail_next = True
+    await a.send()
+    assert [c["project"] for c in await shared.list_claims()] == ["product-a"]
+
+
+@pytest.mark.asyncio
+async def test_get_replies_reads_without_marking_in_projects_mode(tmp_path, monkeypatch):
+    """Through get_replies, the Handler's path: the thread it reads in keeps
+    the project's home (review B2)."""
+    import imaplib
+    from types import SimpleNamespace
+    from sellbird.integrations.smtp_mail import SmtpImapProvider
+    fetched = []
+
+    class FakeImap:
+        def __init__(self, *a): pass
+        def login(self, *a): pass
+        def select(self, *a): pass
+        def search(self, *a): return "OK", [b"1"]
+        def fetch(self, msg_id, what):
+            fetched.append(what)
+            return "NO", []
+        def logout(self): pass
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", FakeImap)
+    env = SimpleNamespace(smtp_host="smtp.example.com", smtp_port=587, smtp_username="u",
+                          smtp_password="p", imap_host="imap.example.com", imap_port=993,
+                          imap_username="u", imap_password="p")
+    provider = SmtpImapProvider(SimpleNamespace(persona=None), env)
+    await provider.get_replies(10)
+    with use_home(Home.for_project(tmp_path, "product-a")):
+        await provider.get_replies(10)
+    assert fetched == ["(RFC822)", "(BODY.PEEK[])"]
+
+
 def test_imap_reads_without_marking_in_projects_mode(tmp_path, monkeypatch):
     """Two projects read one inbox: the first must not hide a reply from the
     second by marking it seen."""

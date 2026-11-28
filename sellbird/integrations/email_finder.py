@@ -154,10 +154,7 @@ async def get_mx_host(domain: str) -> Optional[str]:
     if domain in _mx_cache:
         return _mx_cache[domain]
     try:
-        loop = asyncio.get_event_loop()
-        answers = await loop.run_in_executor(
-            None, lambda: dns.resolver.resolve(domain, "MX")
-        )
+        answers = await asyncio.to_thread(dns.resolver.resolve, domain, "MX")
         records = sorted(answers, key=lambda x: x.preference)
         mx_host = str(records[0].exchange).rstrip(".") if records else None
         _mx_cache[domain] = mx_host or None
