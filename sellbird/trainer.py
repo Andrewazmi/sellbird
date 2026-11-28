@@ -30,6 +30,16 @@ MAX_OBJECTION_ATTEMPTS = 3
 from sellbird.paths import PROJECT_ROOT
 from sellbird.textio import read_user_text
 from sellbird.untrusted import UNTRUSTED_RULE, fence
+from sellbird.workspace_home import _HOME, config_target
+
+
+def _skills_dir() -> Path:
+    """Where training writes its skills: a project's own folder, else the root's."""
+    home = _HOME.get()
+    if home is not None and home.project:
+        home.skills_dir.mkdir(parents=True, exist_ok=True)
+        return home.skills_dir
+    return PROJECT_ROOT / "skills"
 
 
 def _normalize_start_url(url: str) -> str:
@@ -557,9 +567,7 @@ class Trainer:
 
         # Write config (relative paths resolve against the project root,
         # so training works no matter what directory it's launched from)
-        config_path = Path(output_path)
-        if not config_path.is_absolute():
-            config_path = PROJECT_ROOT / config_path
+        config_path = config_target(PROJECT_ROOT / output_path)
         guessed_email = config["persona"]["email"]
         config = write_trained_config(config, config_path)
 
@@ -899,7 +907,7 @@ Do NOT pursue prospects who:
 {product_info.get('tone', 'professional, consultative, confident')}
 """
 
-        skills_path = PROJECT_ROOT / "skills" / "product_knowledge.md"
+        skills_path = _skills_dir() / "product_knowledge.md"
         skills_path.write_text(knowledge, encoding="utf-8")
         print(f"      Generated: skills/product_knowledge.md")
 
@@ -947,7 +955,7 @@ What prospects do instead of buying a solution like ours:
 ---
 """
 
-        skills_path = PROJECT_ROOT / "skills" / "competitive_intel.md"
+        skills_path = _skills_dir() / "competitive_intel.md"
         skills_path.write_text(cards, encoding="utf-8")
         print(f"      Generated: skills/competitive_intel.md")
 

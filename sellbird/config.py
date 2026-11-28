@@ -814,7 +814,12 @@ def load_email_rules(config) -> str:
         return ""
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        path = PROJECT_ROOT / path
+        # A project's own file first, then the root's (sellbird.projects).
+        from sellbird.workspace_home import _HOME
+        home = _HOME.get()
+        bases = ([home.root, home.shared_dir.parent]
+                 if home is not None and home.shared_dir is not None else [PROJECT_ROOT])
+        path = next((b / path for b in bases if (b / path).exists()), bases[0] / path)
     try:
         text = read_user_text(path).strip()
     except FileNotFoundError:
@@ -1229,6 +1234,21 @@ _dnc_cache: dict[str, tuple[tuple, list[str] | None]] = {}
 
 
 def live_do_not_contact(config) -> list[str]:
+    """The do-not-contact list as the config file says it is now, plus, in
+    projects mode, the list in sellbird.projects.yaml that every project
+    shares. A shared list that has never read cleanly raises, so nothing is
+    sent until it's fixed."""
+    own = _live_own_do_not_contact(config)
+    from sellbird.workspace_home import _HOME
+    home = _HOME.get()
+    if home is None or home.shared_dir is None:
+        return own
+    from sellbird.projects import live_settings
+    shared = live_settings(home.shared_dir.parent).do_not_contact
+    return own + [e for e in shared if e not in own]
+
+
+def _live_own_do_not_contact(config) -> list[str]:
     """The do-not-contact list as the config file says it is now.
 
     Someone who sees an approved email to a company they must not contact

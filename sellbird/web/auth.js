@@ -87,6 +87,26 @@ function sameOriginUrl(path) {
   return url.origin === window.location.origin ? url : null;
 }
 
+// ── Which project this tab works in (several objectives in one install) ──
+//
+// Kept per tab, in sessionStorage, and sent as a header on every call, so two
+// tabs on two projects never act on each other's data. Empty outside projects
+// mode, when no header goes out.
+
+const PROJECT_KEY = 'sellbird-project';
+const PROJECT_HEADER = 'X-Sellbird-Project';
+
+function currentProject() {
+  try { return sessionStorage.getItem(PROJECT_KEY) || ''; } catch { return ''; }
+}
+
+function setCurrentProject(name) {
+  try {
+    if (name) sessionStorage.setItem(PROJECT_KEY, name);
+    else sessionStorage.removeItem(PROJECT_KEY);
+  } catch { /* this tab then follows the server's default */ }
+}
+
 // fetch() for this dashboard's own API, with the token attached. Refuses
 // anything that isn't same-origin, and never follows redirects.
 function authFetch(path, opts) {
@@ -97,9 +117,13 @@ function authFetch(path, opts) {
   const headers = new Headers(o.headers || {});
   const token = authToken();
   if (token) headers.set('Authorization', 'Bearer ' + token);
+  const project = currentProject();
+  if (project) headers.set(PROJECT_HEADER, project);
   o.headers = headers;
   o.mode = 'same-origin';
-  o.credentials = 'omit';
+  // No cookies, except the one that remembers the last project picked: the
+  // server sets it on this route, and fetch ignores Set-Cookie under 'omit'.
+  o.credentials = url.pathname === '/api/projects/select' ? 'same-origin' : 'omit';
   o.cache = 'no-store';
   o.redirect = 'error';
   // Not 'no-referrer': per the Fetch spec that makes a POST's Origin "null"

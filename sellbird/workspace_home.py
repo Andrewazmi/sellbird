@@ -35,6 +35,11 @@ class Home:
     mode: Mode = "self_hosted"
     # Object with keyring-style get_password / set_password; None means the default.
     secret_backend: object | None = None
+    # Projects (sellbird.projects): the project's name, and the root's data
+    # folder holding shared.db. Both None outside projects mode, which is how
+    # the code knows the shared layer is off.
+    project: str | None = None
+    shared_dir: Path | None = None
 
     @classmethod
     def for_root(
@@ -57,10 +62,52 @@ class Home:
             secret_backend=secret_backend,
         )
 
+    @classmethod
+    def for_project(cls, root: Path, name: str) -> "Home":
+        """One project under ``<root>/projects/<name>``: its own config,
+        database, prompts and skills; the root's .env, mailbox tokens and
+        dashboard and agent tokens, so keys, mailboxes and the login are
+        shared."""
+        from sellbird.projects import check_name
+        folder = Path(root) / "projects" / check_name(name)
+        data = folder / "data"
+        return replace(
+            cls.for_root(Path(root)),
+            root=folder,
+            data_dir=data,
+            db_path=data / "sellbird.db",
+            prompts_dir=folder / "prompts",
+            skills_dir=folder / "skills",
+            config_file=folder / "sellbird.yaml",
+            project=name,
+            shared_dir=Path(root) / "data",
+        )
+
     @property
     def hosted(self) -> bool:
         return self.mode == "hosted"
 
+    def knowledge_dirs(self, folder: str, name: str = "") -> list[Path]:
+        """Where ``prompts`` or ``skills`` files are looked for, first match
+        wins: this home's own folder, then, for a project, the root's. What
+        training writes about the product (TRAINED_SKILLS) is a project's
+        own: another project's copy at the root would sell the wrong thing."""
+        dirs = [getattr(self, f"{folder}_dir")]
+        if self.shared_dir is not None and not (folder == "skills" and name in TRAINED_SKILLS):
+            dirs.append(self.shared_dir.parent / folder)
+        return dirs
+
+
+def config_target(default: Path) -> Path:
+    """The config file to read and write: a project's own sellbird.yaml (its
+    only one, never a tracked template), else ``default``. One place for
+    setup, the dashboard's offer and training."""
+    home = _HOME.get()
+    return home.config_file if home is not None and home.project else Path(default)
+
+
+# The skills `sellbird train` writes (trainer.py); never shipped.
+TRAINED_SKILLS = ("product_knowledge", "competitive_intel")
 
 _HOME: ContextVar["Home | None"] = ContextVar("sellbird_home", default=None)
 

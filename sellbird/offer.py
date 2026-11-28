@@ -233,12 +233,16 @@ def _clean(kind, value):
 
 
 def editable_config_file(config_file: Path) -> Path:
-    """Where an edit is saved. The tracked sellbird.yaml template stays
-    untrained: edits go in the gitignored sellbird.local.yaml, which then
-    holds your whole config (as `sellbird train` does)."""
+    """Where an edit is saved. In projects mode, the project's own
+    sellbird.yaml (its only one, never a template). Otherwise the tracked
+    sellbird.yaml template stays untrained: edits go in the gitignored
+    sellbird.local.yaml, which then holds your whole config (as `sellbird
+    train` does)."""
     import shutil
-    target = Path(config_file)
-    if target.name == "sellbird.yaml":
+
+    from sellbird.workspace_home import config_target, current_home
+    target = config_target(Path(config_file))
+    if target.name == "sellbird.yaml" and not current_home().project:
         local = target.with_name("sellbird.local.yaml")
         if not local.exists():
             shutil.copyfile(target, local)
