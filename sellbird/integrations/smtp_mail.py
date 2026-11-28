@@ -10,7 +10,10 @@ a Google Workspace account with an app password, or self-hosted mail.
     SMTP_PASSWORD=        IMAP_PASSWORD=   (defaults to SMTP_PASSWORD)
 
 Sends as the configured persona (name + email). IMAP polling fetches
-UNSEEN inbox messages and marks them seen after retrieval.
+UNSEEN inbox messages and marks them seen after retrieval. In projects mode
+(sellbird.projects) every project reads the same inbox, so it reads without
+marking: a reply one project reads stays there for the project it's to, and
+each project skips what it already handled.
 """
 
 import asyncio
@@ -141,9 +144,10 @@ class SmtpImapProvider(MailProvider):
         return SendResult(ok=True, message_id=message_id, thread_ref=message_id)
 
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
-        loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, self._fetch_unseen, limit)
+            # to_thread, not run_in_executor: it carries the project's home
+            # into the thread, which decides how the fetch reads the inbox.
+            return await asyncio.to_thread(self._fetch_unseen, limit)
         except Exception as e:
             logger.error(f"IMAP fetch failed: {e}")
             return []
@@ -158,8 +162,11 @@ class SmtpImapProvider(MailProvider):
             if status != "OK":
                 return []
             ids = data[0].split()[-limit:]
+            from sellbird.workspace_home import _HOME
+            home = _HOME.get()
+            what = "(BODY.PEEK[])" if home is not None and home.shared_dir is not None else "(RFC822)"
             for msg_id in ids:
-                status, parts = conn.fetch(msg_id, "(RFC822)")
+                status, parts = conn.fetch(msg_id, what)
                 if status != "OK" or not parts or not isinstance(parts[0], tuple):
                     continue
                 parsed = self._parse_rfc822(parts[0][1])
@@ -226,7 +233,6 @@ class SmtpImapProvider(MailProvider):
         except Exception as e:
             return False, f"SMTP login failed: {str(e)[:200]}"
         # IMAP handshake
-        loop = asyncio.get_event_loop()
 
         def _imap_check():
             conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
@@ -239,7 +245,7 @@ class SmtpImapProvider(MailProvider):
                     pass
 
         try:
-            await loop.run_in_executor(None, _imap_check)
+            await asyncio.to_thread(_imap_check)
         except Exception as e:
             return False, f"SMTP OK but IMAP login failed: {str(e)[:200]}"
         return True, f"SMTP + IMAP connected as {self.smtp_user}"

@@ -9,6 +9,10 @@ A PID file can outlive its loop (a crash, a reboot) and name whatever process
 later got that number, so the running loop also holds an OS lock on
 data/sellbird.lock. The OS drops the lock when the loop dies, however it dies:
 a live PID with nobody holding the lock is not Sellbird, and is never signalled.
+
+In projects mode (sellbird.projects) one ``sellbird run`` serves every
+project and holds these same root files, so "is the loop running" reads
+them as before.
 """
 
 import logging

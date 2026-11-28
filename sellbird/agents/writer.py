@@ -23,6 +23,7 @@ from sellbird.email_style import (
 from sellbird.humanize import humanize, humanizer_enabled
 from sellbird.integrations.mail_provider import NATIVE_PROVIDERS
 from sellbird.models.campaign import Campaign, EmailStep
+from sellbird.shared import claimed_elsewhere_ids
 from sellbird.state import WRITABLE_EMAIL_STATUSES, StateManager
 from sellbird.sending_mode import sync_sending_mode
 from sellbird.site_facts import site_facts
@@ -260,9 +261,11 @@ class Writer:
             if p.email and (p.email_status or "guess") in WRITABLE_EMAIL_STATUSES
         ]
         # Someone at their company already replied: no cold email to write.
+        # Projects mode: nor while another project is in touch with it.
+        claimed = await claimed_elsewhere_ids(self.state, prospects_with_email)
         prospects_with_email = [
             p for p in prospects_with_email
-            if not await self.state.colleague_who_replied(p.id)
+            if p.id not in claimed and not await self.state.colleague_who_replied(p.id)
         ]
         if not prospects_with_email:
             logger.info(

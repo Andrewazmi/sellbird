@@ -38,8 +38,9 @@ def _refuse(message: str, code: int = 400):
 
 
 def _store() -> MailboxStore:
+    """The request's database: its project's in projects mode."""
     from sellbird import dashboard
-    return MailboxStore(db_path=str(dashboard.DB_PATH))
+    return MailboxStore(db_path=str(dashboard._db_path()))
 
 
 def _secrets() -> SecretStore:
@@ -75,7 +76,9 @@ async def _row(store: MailboxStore, mailbox_id: str) -> dict | None:
 
 @router.get("/api/inboxes")
 async def list_inboxes():
+    from sellbird import dashboard
     from sellbird.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
+    from sellbird.workspace_home import current_home
 
     store = _store()
     await store.init_db()
@@ -85,12 +88,16 @@ async def list_inboxes():
     main = get_mail_provider(config, env) if native else None
     inboxes = await load_inboxes(store, config, env, main)
     rows = {r["id"]: r for r in await store.list_mailboxes()}
+    shared_pauses = {p["inbox"]: p for p in await dashboard._inbox_pauses(store)}
     out = []
     for inbox in inboxes.inboxes.values():
         row = rows.get(inbox.id, {})
+        shared = shared_pauses.get((inbox.address or "").strip().lower())
+        paused_reason = (f"paused for every project by {shared['project']}: {shared['reason']}"
+                         if shared else inbox.paused_reason)
         if not inbox.connected:
             state = "not_connected"
-        elif inbox.paused_reason:
+        elif paused_reason:
             state = "paused"
         else:
             state = "sending"
@@ -102,7 +109,7 @@ async def list_inboxes():
             "connection": "main" if inbox.main else row.get("connection", ""),
             "provider": email.provider if inbox.main else row.get("provider", ""),
             "state": state,
-            "paused_reason": inbox.paused_reason,
+            "paused_reason": paused_reason,
             "cold_cap": inbox.cap,
             "cap_is_yours": row.get("cap_override") is not None,
             "cold_sent_today": inbox.sent_today,
@@ -123,6 +130,8 @@ async def list_inboxes():
         "campaigns": await store._rows(
             "SELECT id, name, status FROM campaigns ORDER BY created_at DESC LIMIT 200"),
         "sending_paused": paused,
+        "project": current_home().project or "",
+        "inbox_pauses": list(shared_pauses.values()),
         "connect_command": "sellbird inboxes connect gmail|microsoft|smtp --address you@domain",
         "can_connect": _can_connect(env),
         "connect_problems": _connect_problems(env),
@@ -236,8 +245,15 @@ async def set_campaign_inboxes(campaign_id: str, request: Request):
 # polls /api/inboxes/connect/status. One sign-in at a time: both flows
 # listen on a fixed local port.
 
-_connect_job: dict = {"state": "idle"}
+# Each project's sign-in shows on its own page; the task stays one at a time.
+_connect_jobs: dict[str, dict] = {}
 _connect_task: asyncio.Task | None = None
+
+
+def _job() -> dict:
+    """This home's sign-in (the task carries the request's home)."""
+    from sellbird.workspace_home import current_home
+    return _connect_jobs.setdefault(current_home().project or "", {"state": "idle"})
 
 
 # A real Google OAuth client id: digits, a dash, then .apps.googleusercontent.com.
@@ -279,7 +295,7 @@ def _connect_problems(env) -> dict:
 
 
 def _connect_job_view() -> dict:
-    return {k: _connect_job.get(k, "") for k in ("state", "kind", "address", "message")}
+    return {k: _job().get(k, "") for k in ("state", "kind", "address", "message")}
 
 
 async def _test(row: dict, config, env, secrets) -> tuple[bool, str]:
@@ -317,7 +333,7 @@ async def _run_main_connect(kind: str, address: str) -> None:
     try:
         done = await asyncio.to_thread(_sign_in, kind, address, env, True)
         if done is None:
-            _connect_job.update(state="failed", message=(
+            _job().update(state="failed", message=(
                 "The sign-in didn't finish, or you signed in as a different address. "
                 "Nothing changed."))
             return
@@ -325,10 +341,10 @@ async def _run_main_connect(kind: str, address: str) -> None:
         await store.init_db()
         await store.log_action(action_type="inbox_connected", agent="you",
                                details={"inbox": address or "main mailbox", "provider": kind})
-        _connect_job.update(state="connected", message="")
+        _job().update(state="connected", message="")
     except Exception:
         logger.exception("Connecting the main mailbox failed")
-        _connect_job.update(state="failed", message="Connecting failed. See the dashboard log.")
+        _job().update(state="failed", message="Connecting failed. See the dashboard log.")
 
 
 async def _run_oauth_connect(kind: str, address: str, name: str, warmup: str) -> None:
@@ -336,7 +352,7 @@ async def _run_oauth_connect(kind: str, address: str, name: str, warmup: str) ->
     try:
         token = await asyncio.to_thread(_sign_in, kind, address, env)
         if token is None:
-            _connect_job.update(state="failed", message=(
+            _job().update(state="failed", message=(
                 "The sign-in didn't finish, or you signed in as a different address. "
                 "Nothing was connected."))
             return
@@ -348,12 +364,12 @@ async def _run_oauth_connect(kind: str, address: str, name: str, warmup: str) ->
         await store.log_action(action_type="inbox_connected", agent="you",
                                details={"inbox": address, "provider": kind})
         ok, detail = await _test(await store.get_mailbox(mailbox_id), config, env, secrets)
-        _connect_job.update(state="connected", message=detail if not ok else "")
+        _job().update(state="connected", message=detail if not ok else "")
     except (ConnectRefused, SecretStoreUnavailable) as e:
-        _connect_job.update(state="failed", message=str(e))
+        _job().update(state="failed", message=str(e))
     except Exception:
         logger.exception("Connecting an inbox failed")
-        _connect_job.update(state="failed", message="Connecting failed. See the dashboard log.")
+        _job().update(state="failed", message="Connecting failed. See the dashboard log.")
 
 
 def _connect_fields(body: dict) -> tuple[str, str, str]:
@@ -386,8 +402,8 @@ async def connect_main_mailbox():
         return _refuse("A sign-in is already open. Finish it in your browser, or wait "
                        "five minutes for it to time out.", 409)
     address = (getattr(config.persona, "email", "") or "").strip().lower()
-    _connect_job.clear()
-    _connect_job.update(state="waiting", kind=provider, address=address, message="")
+    _job().clear()
+    _job().update(state="waiting", kind=provider, address=address, message="")
     _connect_task = asyncio.create_task(_run_main_connect(provider, address))
     return {"success": True, "started": True, "kind": provider}
 
@@ -414,8 +430,8 @@ async def connect_inbox(kind: str, request: Request):
     if _connect_task is not None and not _connect_task.done():
         return _refuse("A sign-in is already open. Finish it in your browser, or wait "
                        "five minutes for it to time out.", 409)
-    _connect_job.clear()
-    _connect_job.update(state="waiting", kind=kind, address=address, message="")
+    _job().clear()
+    _job().update(state="waiting", kind=kind, address=address, message="")
     _connect_task = asyncio.create_task(_run_oauth_connect(kind, address, name, warmup))
     return {"success": True, "started": True}
 

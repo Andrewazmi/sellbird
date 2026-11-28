@@ -30,6 +30,7 @@ from sellbird.integrations.mail_provider import (
 )
 from sellbird.models.conversation import Conversation, Message
 from sellbird.send_window import recipient_zone
+from sellbird.shared import renew_claim
 from sellbird.state import COLLEAGUE_REPLIED, REVIEW_NEXT_REPLY_KEY, StateManager
 from sellbird.sending_mode import sync_sending_mode
 from sellbird.startups import startup_facts
@@ -873,6 +874,10 @@ class Handler:
         # queued sequence email for them is now wrong to send.
         await self.state.update_prospect_status(prospect.id, "replied")
         try:
+            await renew_claim(self.state, prospect)   # projects mode: keep the company
+        except Exception as e:
+            logger.warning(f"Handler: couldn't renew the company claim: {type(e).__name__}")
+        try:
             cancelled = await self.state.cancel_pending_outbox_for_prospect(prospect.id)
             if cancelled:
                 logger.info(
@@ -1375,6 +1380,25 @@ class Handler:
             )
             await self.state.set_setting(KILL_SWITCH_KEY, reason)
             logger.error(f"Handler: KILL SWITCH ENGAGED — {reason}")
+            if self.state.shared is not None:
+                # Projects mode: the inbox's reputation is every project's.
+                inbox = await self._sending_inbox(outbox_item)
+                if inbox:
+                    await self.state.shared.pause_inbox(inbox, self.state.project, reason)
+                    logger.error(f"Handler: {inbox} paused for every project until "
+                                 f"{self.state.project} resumes sending.")
+
+    async def _sending_inbox(self, outbox_item) -> str:
+        """The address the bounced email left from: its inbox's, else this
+        project's main sending address."""
+        from sellbird.integrations.mail_provider import identity_from_config
+        mailbox_id = (outbox_item or {}).get("mailbox_id") or ""
+        if mailbox_id:
+            from sellbird.mailboxes import MailboxStore
+            mailbox = await MailboxStore(db_path=self.state.db_path).get_mailbox(mailbox_id)
+            if mailbox and mailbox.get("address"):
+                return mailbox["address"]
+        return identity_from_config(self.config).address or ""
 
     async def _queue_native_reply(
         self, response: str, prospect, convo, reply_meta: dict, intent: str

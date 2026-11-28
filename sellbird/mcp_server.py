@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import os
 import sys
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -75,12 +76,24 @@ def base_url(host: str, port: int) -> str:
 MODEL_CALL_TIMEOUT = 180.0
 
 
-class CoreClient:
-    """Calls the running dashboard's API as the coding agent."""
+PROJECT_ENV = "SELLBIRD_PROJECT"
+PROJECT_HEADER = "X-Sellbird-Project"
 
-    def __init__(self, data_dir: Path, transport: httpx.AsyncBaseTransport | None = None):
+
+class CoreClient:
+    """Calls the running dashboard's API as the coding agent.
+
+    ``project`` pins every call to one project of an install that has several
+    (docs/projects.md): the dashboard is sent ``X-Sellbird-Project`` and an
+    unknown name is its 404, never another project. Without it nothing is
+    sent, and the dashboard uses its default project (or, in an install with
+    no projects, has nothing to pick)."""
+
+    def __init__(self, data_dir: Path, transport: httpx.AsyncBaseTransport | None = None,
+                 project: str | None = None):
         self.data_dir = Path(data_dir)
         self._transport = transport
+        self.project = project or None
 
     def _client(self, base: str, timeout: float = 15.0) -> httpx.AsyncClient:
         extra = {"transport": self._transport} if self._transport is not None else {}
@@ -112,8 +125,10 @@ class CoreClient:
         base, token = await self._connection()
         try:
             async with self._client(base, timeout) as http:
-                response = await http.request(
-                    method, path, json=json, headers={"Authorization": f"Bearer {token}"})
+                headers = {"Authorization": f"Bearer {token}"}
+                if self.project:
+                    headers[PROJECT_HEADER] = self.project
+                response = await http.request(method, path, json=json, headers=headers)
         except (httpx.TransportError, httpx.InvalidURL, OSError):
             raise CoreUnavailable() from None
         try:
@@ -136,8 +151,17 @@ class CoreClient:
         return await self._request("POST", path, json=body, timeout=timeout)
 
 
+def project_from_env(env=None) -> str | None:
+    """The project ``sellbird mcp --project NAME`` (or SELLBIRD_PROJECT) pins
+    this server to, or None. A name that can't be a project's is an error
+    here, before it reaches a header."""
+    from sellbird.projects import check_name
+    name = (os.environ if env is None else env).get(PROJECT_ENV, "").strip()
+    return check_name(name) if name else None
+
+
 def default_client() -> CoreClient:
-    return CoreClient(PROJECT_ROOT / "data")
+    return CoreClient(PROJECT_ROOT / "data", project=project_from_env())
 
 
 # ── A `workspace` argument on every tool, for a server reaching several ──
@@ -600,7 +624,13 @@ def build_server(client_factory: Callable[[], CoreClient] = default_client, *,
     return server
 
 
-def run_stdio() -> None:
+def run_stdio(project: str | None = None) -> None:
+    """Serve over stdio. ``project`` pins the server to one project (it is
+    what ``sellbird mcp --project NAME`` passes); SELLBIRD_PROJECT does the same."""
     # stdout carries the protocol; logs go to stderr.
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr, force=True)
+    if project:
+        from sellbird.projects import check_name
+        os.environ[PROJECT_ENV] = check_name(project)
+    project_from_env()      # a bad name stops here, with the reason, not at the first call
     build_server().run("stdio")

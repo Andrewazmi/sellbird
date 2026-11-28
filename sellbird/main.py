@@ -21,6 +21,7 @@ from sellbird.pidfile import (
 )
 from sellbird.pipeline import run_profile_stage
 from sellbird.state import StateManager
+from sellbird.workspace_home import _HOME, use_home
 
 logging.basicConfig(
     level=logging.INFO,
@@ -535,11 +536,13 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
 
 def _needs_setup() -> bool:
-    """Check if Sellbird needs first-time setup."""
+    """Check if Sellbird (or, inside a project's home, that project) needs
+    first-time setup."""
     from sellbird.paths import PROJECT_ROOT
     from sellbird.config import _find_config_file, ConfigFileNotFoundError
 
-    env_file = PROJECT_ROOT / ".env"
+    home = _HOME.get()
+    env_file = home.env_file if home is not None else PROJECT_ROOT / ".env"
 
     # If .env doesn't exist, definitely needs setup
     if not env_file.exists():
@@ -567,8 +570,44 @@ def _needs_setup() -> bool:
     return False
 
 
-async def _run_with_signals():
-    """Run the heartbeat with SIGINT/SIGTERM wired to a graceful shutdown."""
+class _ProjectTag(logging.Filter):
+    """Projects mode: each log line names its project, read from the task's
+    home (sellbird.workspace_home), so threads it starts are named too."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        home = _HOME.get()
+        if home is not None and home.project and not getattr(record, "project", None):
+            record.project = home.project
+            record.name = f"{record.name}:{home.project}"
+        return True
+
+
+async def run_projects(homes: list, stop_event: asyncio.Event) -> None:
+    """One heartbeat per project, in this process (sellbird.projects).
+
+    Each task is created inside its project's home, so the context it copies
+    holds that home: its config, database, prompts and drafts are the
+    project's, and so are those of every thread it starts. A project whose
+    config can't load stops on its own; the others keep running. The stop
+    event stops them all.
+    """
+    from sellbird.shared import SharedState
+
+    if homes and homes[0].shared_dir is not None:
+        await SharedState(homes[0].shared_dir).init_db()
+    tasks = []
+    for home in homes:
+        with use_home(home):
+            tasks.append(asyncio.create_task(heartbeat(stop_event), name=f"project:{home.project}"))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for home, result in zip(homes, results):
+        if isinstance(result, Exception):
+            logger.error(f"Project {home.project} stopped: {result}", exc_info=result)
+
+
+async def _run_with_signals(homes: list | None = None):
+    """Run the heartbeat (or, in projects mode, one per project) with
+    SIGINT/SIGTERM wired to a graceful shutdown."""
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -586,11 +625,70 @@ async def _run_with_signals():
             # Windows / non-main-thread fallback
             signal.signal(sig, lambda s, f: _request_shutdown(signal.Signals(s).name))
 
-    await heartbeat(stop_event)
+    if homes is None:
+        await heartbeat(stop_event)
+    else:
+        await run_projects(homes, stop_event)
+
+
+def _cannot_run(home) -> str:
+    """Why a project can't run in projects mode, or ""."""
+    from sellbird.projects import config_problem
+    if _needs_setup():
+        return (f"Project {home.project} isn't set up yet. "
+                f"Run `sellbird setup --project {home.project}` in a terminal first.")
+    return config_problem(home)
+
+
+def _main_projects(root, names: list[str]) -> None:
+    """``sellbird run`` in projects mode: every project in this one process,
+    holding the root's lock and PID file (sellbird.pidfile). A project that
+    can't run is named and skipped."""
+    from sellbird import projects
+
+    lock = hold_loop_lock(LOCK_FILE)
+    if lock is None:
+        running = read_pid()
+        print(f"Sellbird is already running{f' (pid {running})' if running else ''}. "
+              "Stop it first, from the dashboard or with Ctrl+C in its terminal.")
+        sys.exit(1)
+    try:
+        homes = []
+        for name in names:
+            home = projects.project_home(root, name)
+            with use_home(home):
+                why = _cannot_run(home)
+            if why:
+                print(f"{why} Skipping it.")
+                continue
+            homes.append(home)
+        if not homes:
+            print("No project can run. See the lines above.")
+            sys.exit(1)
+        write_pid_file()
+        tag = _ProjectTag()
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(tag)
+        logger.info(f"Projects: running {', '.join(h.project for h in homes)}.")
+        try:
+            asyncio.run(_run_with_signals(homes))
+        except KeyboardInterrupt:
+            logger.info("Goodbye.")
+    finally:
+        remove_pid_file()
+        release_loop_lock(lock)
 
 
 def main():
     """Entry point."""
+    from sellbird import projects
+    from sellbird.paths import PROJECT_ROOT
+
+    names = projects.discover(PROJECT_ROOT)
+    if names:
+        _main_projects(PROJECT_ROOT, names)
+        return
+
     # Check for first-time setup
     if _needs_setup():
         if not sys.stdin.isatty():
