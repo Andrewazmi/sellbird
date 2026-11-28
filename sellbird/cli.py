@@ -188,7 +188,11 @@ def cmd_mcp(args):
         sys.exit(2)
     from sellbird.mcp_server import run_stdio
 
-    run_stdio()
+    project = getattr(args, "project", None)
+    if project:
+        run_stdio(project=project)
+    else:
+        run_stdio()
 
 
 def cmd_connect(args):
@@ -1074,10 +1078,16 @@ def cmd_sending(args):
         elif args.sending_action == "resume":
             await state.set_setting("sending_paused", "")
             await state.set_setting("bounce_count", "0")
-            print("\n  Sending resumed (bounce counter reset).\n")
+            lifted = await state.shared.resume_inboxes(state.project) if state.shared else 0
+            print("\n  Sending resumed (bounce counter reset"
+                  + (f", {lifted} inbox pause(s) lifted for every project" if lifted else "")
+                  + ").\n")
         else:
             paused = await state.get_setting("sending_paused")
             print(f"\n  Sending: {'PAUSED — ' + paused if paused else 'active'}\n")
+            for inbox, pause in (await state.shared.inbox_pauses() if state.shared else {}).items():
+                print(f"  {inbox}: paused for every project by {pause['project']} "
+                      f"({pause['reason']})\n")
 
     asyncio.run(_run())
 
@@ -1323,6 +1333,88 @@ def cmd_recommended(args):
     print()
 
 
+# Projects mode (sellbird.projects): commands that are the install's, not a
+# project's, and run as they are. `mcp` picks its project itself.
+NO_PROJECT_COMMANDS = {"install", "run", "dashboard", "gmail", "microsoft", "precleared-key",
+                       "mcp", "connect", "autostart", "tray", "recommended", "projects"}
+# Without a project these act on the whole install: `sending` on every
+# project, `suppressions` on the list every project shares.
+INSTALL_WIDE_COMMANDS = {"sending", "suppressions"}
+
+
+def _lift_orphan_pauses(root, names) -> None:
+    """An inbox pause set by a project that's gone (removed or renamed) can't
+    be lifted by resuming that project, so an install-wide resume lifts it."""
+    from pathlib import Path
+    from sellbird.shared import SharedState
+
+    async def _run():
+        shared = SharedState(Path(root) / "data")
+        await shared.init_db()
+        gone = {p["project"] for p in (await shared.inbox_pauses()).values()} - set(names)
+        return sum([await shared.resume_inboxes(project) for project in sorted(gone)])
+    lifted = asyncio.run(_run())
+    if lifted:
+        print(f"  Lifted {lifted} inbox pause(s) set by a project that no longer exists.")
+
+
+def _dispatch(args, root) -> None:
+    """Run the command, in its project's home in projects mode."""
+    import os
+    from sellbird import projects
+    from sellbird.workspace_home import use_home
+
+    asked = (getattr(args, "project", None) or args.global_project
+             or os.environ.get("SELLBIRD_PROJECT", "").strip() or None)
+    names = projects.discover(root)
+    if not names or args.command == "projects":
+        if asked and args.command not in ("projects", "mcp"):
+            print(f"\n  This install has no projects, so --project {asked} means nothing here.\n")
+            sys.exit(2)
+        args.func(args)
+        return
+    if args.command == "mcp":
+        args.project = asked
+    if args.command == "run" and args.global_project:
+        print(f"\n  `sellbird run` serves every project in one loop, so it takes no project."
+              f"\n  Run `sellbird run` on its own; it runs {', '.join(names)}.\n")
+        sys.exit(2)
+    if args.command in NO_PROJECT_COMMANDS:
+        args.func(args)
+        return
+    if asked:
+        try:
+            home = projects.project_home(root, asked)
+        except projects.UnknownProject as e:
+            print(f"\n  {e} Projects here: {', '.join(names)}.\n")
+            sys.exit(1)
+        if args.command == "sending":
+            print(f"  {asked}" + ("" if (getattr(args, "project", None) or args.global_project)
+                                  else " (from SELLBIRD_PROJECT)") + ":", end="")
+        with use_home(home):
+            args.func(args)
+        return
+    if args.command == "sending":
+        for name in names:
+            print(f"  {name}:", end="")
+            with use_home(projects.project_home(root, name)):
+                args.func(args)
+        if args.sending_action == "resume":
+            _lift_orphan_pauses(root, names)
+        if args.sending_action in ("pause", "resume"):
+            print(f"  {'Paused' if args.sending_action == 'pause' else 'Resumed'}: "
+                  f"{', '.join(names)} (every project).\n")
+        return
+    if args.command == "suppressions":
+        # Any project's view adds to and removes from the shared list.
+        with use_home(projects.project_home(root, projects.default_project(root))):
+            args.func(args)
+        return
+    print(f"\n  This install has projects ({', '.join(names)}). Say which one:\n"
+          f"    sellbird --project NAME {args.command} ...   (or set SELLBIRD_PROJECT)\n")
+    sys.exit(2)
+
+
 def main():
     from sellbird.textio import utf8_stdio
     utf8_stdio()
@@ -1333,6 +1425,9 @@ def main():
         prog="sellbird",
         description="Sellbird — the open-source outreach platform. Make the first move.",
     )
+    parser.add_argument("--project", dest="global_project", metavar="NAME", default=None,
+                        help="The project a command works on, in an install with several "
+                             "(or set SELLBIRD_PROJECT)")
     subparsers = parser.add_subparsers(dest="command")
 
     # sellbird install
@@ -1341,6 +1436,7 @@ def main():
 
     # sellbird setup
     sub = subparsers.add_parser("setup", help="Run the interactive setup wizard")
+    sub.add_argument("--project", metavar="NAME", help="Set up this project (projects mode)")
     sub.set_defaults(func=cmd_setup)
 
     # sellbird run
@@ -1350,6 +1446,7 @@ def main():
     # sellbird train <url>
     sub = subparsers.add_parser("train", help="Train Sellbird on a website")
     sub.add_argument("url", help="Website URL to crawl and learn from")
+    sub.add_argument("--project", metavar="NAME", help="Train this project (projects mode)")
     sub.add_argument(
         "max_pages",
         nargs="?",
@@ -1519,6 +1616,8 @@ def main():
     sub.add_argument("--print", dest="print_config", action="store_true",
                      help="Print the config to add by hand; change nothing")
     sub.add_argument("--yes", action="store_true", help="Apply without asking")
+    sub.add_argument("--project", metavar="NAME",
+                     help="Work on this project only (an install with several)")
     sub.set_defaults(func=cmd_mcp)
 
     sub = subparsers.add_parser(
@@ -1575,6 +1674,10 @@ def main():
     sub.add_argument("value", nargs="?", default="", help="add: an address or domain; remove: its id")
     sub.set_defaults(func=cmd_suppressions)
 
+    # sellbird projects
+    from sellbird.projects_cli import add_parser as add_projects_parser
+    add_projects_parser(subparsers)
+
     # Commands that installed extensions add (sellbird.extensions). A name the
     # built-in CLI already uses is refused, so an extension never hides one.
     from sellbird import extensions
@@ -1611,7 +1714,7 @@ def main():
         sys.exit(0)
 
     try:
-        args.func(args)
+        _dispatch(args, home_root)
     except KeyboardInterrupt:
         print("\n  Interrupted. Goodbye.")
         sys.exit(130)

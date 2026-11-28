@@ -27,7 +27,7 @@ from sellbird.gate import autopilot_review, do_not_contact_match, pre_send_check
 from sellbird.send_hooks import NO_HEADERS_HOLD, SendCheck, SendHookError, extra_headers, first_verdict
 from sellbird.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from sellbird.integrations.instantly import InstantlyClient
-from sellbird.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
+from sellbird.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider, identity_from_config
 from sellbird.integrations.precleared import (
     UNKNOWN_ATTEMPTS, UNKNOWN_RETRY_AFTER, PreclearedClient, clear_hold, record_hold,
 )
@@ -35,8 +35,9 @@ from sellbird.integrations.signature import signature_problem
 from sellbird.email_style import style_problems
 from sellbird.mailboxes import Inboxes, load_inboxes
 from sellbird.sending_mode import SIGNATURE_HOLD_PREFIX, sync_sending_mode
+from sellbird.shared import claim_company, claimed_elsewhere, release_fresh_claim
 from sellbird.state import (
-    AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
+    AUTOPILOT_OFF_REASON, CLAIM_HOLD_PREFIX, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
     MANUAL_SEND_KEY, MAYBE_SENT_PREFIX, MOVED_BACK_PREFIXES, RECHECK_PREFIX,
     UNKNOWN_HOLD_PREFIX, StateManager,
 )
@@ -62,6 +63,9 @@ SEND_JITTER_SECONDS = (4, 15)
 ADDRESS_RETRY_AFTER = timedelta(hours=6)
 DOMAINS_FAILING_TO_PAUSE = 2
 CHECK_SECONDS_PER_CYCLE = 90
+# Projects mode: a cold email another project's company claim holds is
+# tried again this much later.
+CLAIM_RETRY_AFTER = timedelta(days=1)
 
 # Prospect pipeline statuses that mean "stop emailing this person".
 STOP_STATUSES = {"replied", "opted_out", "lost", "meeting", "closed"}
@@ -923,9 +927,18 @@ class Sender:
         # Counted from local midnight, the day the ramp counts in.
         cold_cap = cold_daily_cap(self.config.channels.email)
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        since_midnight = midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
         cold_left = cold_cap - await self.state.count_outbox_sent_today(
-            kind="sequence",
-            since=midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat())
+            kind="sequence", since=since_midnight)
+        # Projects mode: each inbox's cold email counts every project's
+        # (sellbird.shared), up to inbox_daily_cap (0: no shared cap).
+        shared_cap = 0
+        if self.state.shared is not None:
+            from sellbird.projects import install_root, live_settings
+            shared_cap = live_settings(install_root()).inbox_daily_cap
+        main_address = identity_from_config(self.config).address if self.state.shared is not None else ""
+        # Inboxes a project's bounce rate paused hold every project's email.
+        inbox_pauses = await self.state.shared.inbox_pauses() if self.state.shared is not None else {}
 
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         # In quiet hours only cold email can go, so only cold email is
@@ -988,6 +1001,11 @@ class Sender:
         check_seconds = 0.0
         # Several inboxes: why emails waited on their inbox, by reason.
         inbox_waits: dict[str, int] = {}
+        # Projects mode: cold emails held by the shared inbox cap, or by
+        # another project's claim on the company.
+        held_shared = 0
+        held_claimed = 0
+        held_paused: dict[str, str] = {}
         for item in due:
             if sent >= budget:
                 break
@@ -1012,6 +1030,15 @@ class Sender:
                 provider = inbox.provider
             elif item["kind"] == "sequence" and sent_cold >= cold_left:
                 held_cold += 1
+                continue
+            sending_address = inbox.address if inbox is not None else main_address
+            pause = inbox_pauses.get((sending_address or "").strip().lower())
+            if pause:
+                held_paused[sending_address] = pause["project"]
+                continue
+            if (shared_cap and item["kind"] == "sequence"
+                    and await self.state.shared.inbox_sent_since(sending_address, since_midnight) >= shared_cap):
+                held_shared += 1
                 continue
             needs_check = self.precleared is not None and item["kind"] == "sequence"
 
@@ -1143,6 +1170,17 @@ class Sender:
                         outside_window += 1
                         continue
 
+            # Projects mode: a cold email waits while another project is in
+            # touch with its company (it claims the company only as it
+            # leaves, below).
+            if item["kind"] == "sequence":
+                holder = await claimed_elsewhere(self.state, prospect)
+                if holder:
+                    await self._retry_later(item, f"project {holder} holds it",
+                                            after=CLAIM_RETRY_AFTER, prefix=CLAIM_HOLD_PREFIX)
+                    held_claimed += 1
+                    continue
+
             # Claim it. A reply, bounce, hand send or rejection may have
             # cancelled it since the queue was read; then it stays cancelled.
             if not await self.state.claim_outbox_item(item["id"]):
@@ -1174,6 +1212,25 @@ class Sender:
                                                     error=f"held: {NO_HEADERS_HOLD}")
                 continue
             extra = {"headers": headers} if headers else {}
+            # Projects mode: claim the company, and take this inbox's place
+            # for today across every project, each in one statement. Both go
+            # back if the email never left.
+            ledger, fresh_claim = None, ""
+            if self.state.shared is not None and item["kind"] == "sequence":
+                holder, fresh_claim = await claim_company(self.state, prospect)
+                if holder:      # another project got there since the check above
+                    await self.state.update_outbox_item(item["id"], status="approved")
+                    await self._retry_later(item, f"project {holder} holds it",
+                                            after=CLAIM_RETRY_AFTER, prefix=CLAIM_HOLD_PREFIX)
+                    held_claimed += 1
+                    continue
+                ledger = await self.state.shared.reserve_inbox_send(
+                    sending_address, self.state.project, shared_cap, since_midnight)
+                if ledger is None:
+                    await release_fresh_claim(self.state, fresh_claim)
+                    await self.state.update_outbox_item(item["id"], status="approved")
+                    held_shared += 1
+                    continue
             try:
                 result = await provider.send_email(
                     item["to_email"], item["subject"], body,
@@ -1189,6 +1246,9 @@ class Sender:
                 )
                 logger.warning(f"Sender: send to {item['to_email']} raised: {e}")
                 continue
+            if ledger is not None and not result.ok and not getattr(result, "uncertain", False):
+                await self.state.shared.unreserve_inbox_send(ledger)
+                await release_fresh_claim(self.state, fresh_claim)
             if not result.ok and result.error.startswith("signature:"):
                 # The logo broke after this drain checked it, and the provider
                 # refused before sending: this email waits, like the others.
@@ -1286,6 +1346,15 @@ class Sender:
                 await record_hold(self.state, hold, waiting_on_check)
             elif answered:
                 await clear_hold(self.state)
+        if held_shared:
+            logger.info(f"Sender: {held_shared} cold email(s) wait for their inbox's daily cap "
+                        f"across projects (inbox_daily_cap: {shared_cap}). Replies still go out.")
+        if held_claimed:
+            logger.info(f"Sender: {held_claimed} cold email(s) wait: another project is in "
+                        "touch with their company.")
+        for address, project in held_paused.items():
+            logger.warning(f"Sender: nothing leaves {address}: project {project}'s bounce rate "
+                           f"paused it. `sellbird --project {project} sending resume` lifts it.")
         if held_cold and inboxes is not None:
             logger.info(f"Sender: {held_cold} cold email(s) wait for their inbox's daily cap. "
                         "Replies still go out. See `sellbird inboxes list`.")

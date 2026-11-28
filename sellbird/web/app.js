@@ -502,8 +502,7 @@ function unlockWithToken(event) {
     return;
   }
   hideLock();
-  loadCurrentTab();
-  loadSellbirdStatus();
+  initProjects().then(() => { loadCurrentTab(); loadSellbirdStatus(); });
 }
 
 // Downloads go through the same authorised fetch and are handed to the
@@ -1831,12 +1830,14 @@ async function loadSellbirdStatus() {
   label.textContent = running ? 'Running' : 'Stopped';
 
   const meta = document.getElementById('control-meta');
+  // With projects there is one loop for all of them: say so.
+  const scope = !data.project ? '' : running ? ' &middot; runs every project' : ' One loop runs every project.';
   if (running && data.pid) {
     let info = 'PID ' + escHtml(String(data.pid));
     if (data.started_at) info += ' &middot; started ' + formatDate(data.started_at);
-    meta.innerHTML = info;
+    meta.innerHTML = info + scope;
   } else {
-    meta.innerHTML = 'Sellbird wakes every few minutes, does what needs doing, and sleeps.';
+    meta.innerHTML = 'Sellbird wakes every few minutes, does what needs doing, and sleeps.' + scope;
   }
 
   document.getElementById('btn-start').style.display = running ? 'none' : '';
@@ -2063,7 +2064,7 @@ async function loadOutbox() {
 
   actions.innerHTML = data.paused
     ? onlyYou() + '<button class="btn btn-primary btn-sm" onclick="sendingToggle(\'resume\')">Resume sending</button>'
-    : '<button class="btn btn-secondary btn-sm" onclick="sendingToggle(\'pause\')">Pause all sending</button>';
+    : '<button class="btn btn-secondary btn-sm" onclick="sendingToggle(\'pause\')">' + pauseLabel() + '</button>';
 
   // The kill switch gets a banner only when it's actually on — a permanent
   // bar for a thing that isn't happening is just noise.
@@ -3304,9 +3305,11 @@ async function loadInboxes() {
 
   let html = '';
   if (data.sending_paused) {
-    html += '<div class="notice wait"><b>All sending is paused:</b> ' + escHtml(data.sending_paused) +
+    html += '<div class="notice wait"><b>' + (data.project ? 'Sending is paused for this project'
+      : 'All sending is paused') + ':</b> ' + escHtml(data.sending_paused) +
       '. Resume it in the Outbox.</div>';
   }
+  html += inboxPausesHtml(data.inbox_pauses);
   const list = data.inboxes || [];
   const sending = list.filter(i => i.state === 'sending');
   const capToday = sending.reduce((n, i) => n + (Number(i.cold_cap) || 0), 0);
@@ -4966,19 +4969,28 @@ async function loadLimits() {
   el.innerHTML = limitsHtml(d);
 }
 
+// Inboxes one project's bounce rate paused for every project (projects mode).
+function inboxPausesHtml(pauses) {
+  return (pauses || []).map(p => '<div class="notice wait"><b>' + escHtml(p.inbox) +
+    ' is paused for every project</b> by ' + escHtml(p.project) + ': ' + escHtml(p.reason) +
+    '. Turning sending back on in ' + escHtml(p.project) + ' lifts it.</div>').join('');
+}
+
 function limitsHtml(d) {
   const r = (t, sub, tag, tone) => '<div class="row"><div class="grow"><p class="t">' + t + '</p><p class="s">' + sub + '</p></div>' +
     (tag ? '<span class="tag ' + (tone || '') + '">' + tag + '</span>' : '') + '</div>';
   const file = '<code>' + escHtml(d.file || 'sellbird.yaml') + '</code>';
   const auto = d.mode === 'autopilot', paused = !!d.paused;
   const q = d.quiet_hours || {}, w = d.send_window, t = d.texting;
-  return '<div class="secs">' +
+  return inboxPausesHtml(d.inbox_pauses) + '<div class="secs">' +
     '<section class="sec span"><div class="w"><div class="row"><div class="grow"><p class="t">' +
-      (paused ? 'All sending is paused' : 'Sending is on') + '</p><p class="s">' +
+      (paused ? (currentProject() ? 'Sending is paused for this project' : 'All sending is paused')
+              : 'Sending is on') + '</p><p class="s">' +
       (paused ? escHtml(d.paused) + '. Nothing goes out until you turn it back on. Only you can.'
-              : 'One press stops every email and text. Your agent can press it too. Only you can undo it.') + '</p></div>' +
+              : 'One press stops every email and text' + (currentProject() ? ' from this project' : '') +
+                '. Your agent can press it too. Only you can undo it.') + '</p></div>' +
       (paused ? '<button class="btn btn-primary btn-sm" onclick="limitsToggle(\'resume\')">Turn sending back on</button>'
-              : '<button class="btn btn-danger btn-sm" onclick="limitsToggle(\'pause\')">Pause all sending</button>') +
+              : '<button class="btn btn-danger btn-sm" onclick="limitsToggle(\'pause\')">' + pauseLabel() + '</button>') +
       '</div></div></section>' +
     '<section class="sec"><h2>What sends on its own</h2><div class="w">' +
       '<div class="row"><div class="grow"><p class="t">Email autopilot</p><p class="s">' +
@@ -5786,12 +5798,62 @@ async function listenForGoTo() {
 
 // ── Init & live refresh ──
 
-document.body.classList.add('first-load');
-showTab(fromHash(), {fromHash: true, focus: false, initial: true});
-setTimeout(() => document.body.classList.remove('first-load'), 700);
-loadSellbirdStatus();
-loadAgentReport();
-listenForGoTo();
+// ── Projects: one dashboard, several objectives (docs/projects.md) ──
+//
+// Shown only when the install has projects. This tab's project is kept in
+// sessionStorage and sent on every call (auth.js), so two tabs on two projects
+// stay apart; the server's cookie only remembers the last one picked, for
+// plain links.
+
+// The pause switch is each project's own: say so when there are projects.
+function pauseLabel() {
+  return currentProject() ? 'Pause sending for this project' : 'Pause all sending';
+}
+
+async function initProjects() {
+  const wrap = document.getElementById('project-switch');
+  const data = await api('/api/projects');
+  if (!data) return;   // locked or offline: ask again once there is an answer
+  if (!Array.isArray(data.projects) || !data.projects.length) {
+    setCurrentProject('');
+    wrap.hidden = true;
+    return;
+  }
+  // The server's answer wins: a name this tab kept that is gone falls back to the default.
+  const current = data.projects.includes(data.current) ? data.current : (data.default || data.projects[0]);
+  setCurrentProject(current);
+  const select = document.getElementById('project-select');
+  select.innerHTML = data.projects.map(name =>
+    '<option value="' + escHtml(name) + '"' + (name === current ? ' selected' : '') + '>' +
+    escHtml(name) + '</option>').join('');
+  wrap.hidden = false;
+  document.title = 'Sellbird \u00b7 ' + current;
+}
+
+async function switchProject(name) {
+  if (!name || name === currentProject()) return;
+  setCurrentProject(name);
+  // Plain links and other tools follow the last choice.
+  try {
+    await authFetch('/api/projects/select', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({project: name})});
+  } catch { /* this tab's header is what counts */ }
+  // Every view starts over on the new project: nothing from the last one stays
+  // on screen, in a poll or in a form. A record of the old project would be
+  // a 404 in the new one, so the page reopens on its tab, not on a record.
+  history.replaceState(null, '', '#' + (currentTab || 'today'));
+  location.reload();
+}
+
+(async function start() {
+  await initProjects();
+  document.body.classList.add('first-load');
+  showTab(fromHash(), {fromHash: true, focus: false, initial: true});
+  setTimeout(() => document.body.classList.remove('first-load'), 700);
+  loadSellbirdStatus();
+  loadAgentReport();
+  listenForGoTo();
+})();
 // The agent chip and the answer lines: what the agent did, kept fresh.
 setInterval(() => { if (!document.hidden && !_locked) loadAgentReport(); }, 30000);
 

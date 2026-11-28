@@ -7,7 +7,9 @@ Windows tool, may not be UTF-8: those are still read, with a warning.
 
 import locale
 import logging
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger("sellbird.textio")
@@ -46,3 +48,19 @@ def utf8_stdio(*streams):
             stream.reconfigure(encoding="utf-8", errors=errors)
         except (AttributeError, ValueError, OSError):
             pass  # not a reconfigurable text stream (tests, embedded use)
+
+
+def write_private_text(path, text: str) -> None:
+    """Write ``text`` owner-only (mkstemp makes 0o600) through a temp file in
+    the same folder and os.replace, so a crash or a second process never
+    leaves a half-written file. For tokens two projects' loops may refresh."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise

@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from sellbird.paths import PROJECT_ROOT
+from sellbird.textio import write_private_text
 from sellbird.workspace_home import current_home
 from sellbird.integrations.mail_provider import (
     InboundMessage,
@@ -108,13 +109,8 @@ def _load_token() -> dict | None:
 
 
 def _save_token(data: dict):
-    token_file = current_home().m365_token_file
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    try:
-        token_file.chmod(0o600)
-    except OSError:
-        pass
+    # Atomic: in projects mode several loops may refresh the one token file.
+    write_private_text(current_home().m365_token_file, json.dumps(data, indent=2))
 
 
 def _token_url(tenant: str) -> str:
