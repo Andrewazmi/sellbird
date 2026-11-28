@@ -59,6 +59,8 @@ def install(tmp_path, monkeypatch):
     monkeypatch.setattr(dash, "DB_PATH", root / "data" / "sellbird.db")
     monkeypatch.setattr(dash, "PID_FILE", root / "data" / "sellbird.pid")
     monkeypatch.setattr(dash, "LOCK_FILE", root / "data" / "sellbird.lock")
+    # Start opens the log; never the checkout's data/ (which may not exist).
+    monkeypatch.setattr(dash, "LOG_FILE", root / "data" / "sellbird.log")
     monkeypatch.setattr(dash, "ENV_FILE", root / ".env")
     monkeypatch.setattr(dash, "WEB_DIR", Path(__file__).resolve().parent.parent / "sellbird" / "web")
     monkeypatch.setattr(dash, "_discovery_runs", {})
