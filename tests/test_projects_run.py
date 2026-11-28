@@ -194,54 +194,52 @@ def install(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_run_in_projects_mode_holds_the_root_and_each_project_lock(install, monkeypatch):
+def test_run_in_projects_mode_holds_the_roots_lock_and_skips_what_cant_run(install, monkeypatch, capsys):
     make_project(install, "product-a", "Example Roofing")
     make_project(install, "segment-b", "Example Dental")
     make_project(install, "not-trained", "Your Company")
+    legacy = make_project(install, "legacy-c", "Example Legacy")
+    legacy.config_file.write_text(trained("Example Legacy").replace(
+        'provider: "gmail"', 'provider: "instantly"', 1), encoding="utf-8")
+    monkeypatch.setattr(main_mod, "LOCK_FILE", install / "data" / "sellbird.lock")
+    monkeypatch.setattr(pidfile, "PID_FILE", install / "data" / "sellbird.pid")
     seen = {}
 
     async def run(homes=None):
         seen["homes"] = [h.project for h in homes]
         seen["root"] = pidfile.loop_lock_held(install / "data" / "sellbird.lock")
-        seen["locks"] = [pidfile.loop_lock_held(h.data_dir / "sellbird.lock") for h in homes]
-        seen["pids"] = [pidfile.read_pid(h.data_dir / "sellbird.pid") for h in homes]
+        seen["pid"] = pidfile.read_pid()
 
     monkeypatch.setattr(main_mod, "_run_with_signals", run)
     main_mod.main()
-    assert seen["homes"] == ["product-a", "segment-b"]     # the untrained one is skipped
-    assert seen["root"] is True and seen["locks"] == [True, True]
-    assert all(seen["pids"])
-    # All released and removed afterwards.
+    assert seen["homes"] == ["product-a", "segment-b"]     # untrained and Instantly skipped
+    assert seen["root"] is True and seen["pid"]
+    out = capsys.readouterr().out
+    assert "legacy-c sends through Instantly" in out and "not-trained isn't set up" in out
+    # Released and removed afterwards; no project gets a lock of its own.
     assert not pidfile.loop_lock_held(install / "data" / "sellbird.lock")
     assert not (install / "data" / "sellbird.pid").exists()
-    assert not (install / "projects" / "product-a" / "data" / "sellbird.pid").exists()
+    assert not (install / "projects" / "product-a" / "data" / "sellbird.lock").exists()
 
 
-def test_one_project_never_runs_twice(install, monkeypatch, capsys):
-    a = make_project(install, "product-a", "Example Roofing")
+def test_a_second_run_refuses_while_the_first_runs(install, monkeypatch, capsys):
+    make_project(install, "product-a", "Example Roofing")
+    lock = install / "data" / "sellbird.lock"
+    monkeypatch.setattr(main_mod, "LOCK_FILE", lock)
     ran = []
 
     async def run(homes=None):
         ran.append(homes)
 
     monkeypatch.setattr(main_mod, "_run_with_signals", run)
-    held = pidfile.hold_loop_lock(a.data_dir / "sellbird.lock")
+    held = pidfile.hold_loop_lock(lock)
     try:
         with pytest.raises(SystemExit) as exc:
-            main_mod.main(project="product-a")
+            main_mod.main()
     finally:
         pidfile.release_loop_lock(held)
     assert exc.value.code == 1 and ran == []
-    assert "product-a is already running" in capsys.readouterr().out
-    # --project doesn't take the root's lock, so it never blocks the dashboard's check.
-    assert not (install / "data" / "sellbird.lock").exists()
-
-
-def test_run_project_refuses_an_unknown_name(install, monkeypatch, capsys):
-    make_project(install, "product-a", "Example Roofing")
-    with pytest.raises(SystemExit):
-        main_mod.main(project="product-b")
-    assert "No project named 'product-b'" in capsys.readouterr().out
+    assert "already running" in capsys.readouterr().out
 
 
 def test_no_projects_folder_runs_one_heartbeat_as_before(install, monkeypatch):

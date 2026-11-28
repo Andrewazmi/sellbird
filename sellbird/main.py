@@ -631,73 +631,62 @@ async def _run_with_signals(homes: list | None = None):
         await run_projects(homes, stop_event)
 
 
-def _main_projects(root, names: list[str], only: str | None) -> None:
-    """``sellbird run`` in projects mode: every project in this process, or
-    just ``only``. Locks as sellbird.pidfile describes: the root's for the
-    all-projects runner, and each running project's own."""
+def _cannot_run(home) -> str:
+    """Why a project can't run in projects mode, or ""."""
+    from sellbird.projects import config_problem
+    if _needs_setup():
+        return (f"Project {home.project} isn't set up yet. "
+                f"Run `sellbird setup --project {home.project}` in a terminal first.")
+    return config_problem(home)
+
+
+def _main_projects(root, names: list[str]) -> None:
+    """``sellbird run`` in projects mode: every project in this one process,
+    holding the root's lock and PID file (sellbird.pidfile). A project that
+    can't run is named and skipped."""
     from sellbird import projects
 
-    try:
-        wanted = [only] if only is not None else names
-        homes = [projects.project_home(root, name) for name in wanted]
-    except projects.UnknownProject as e:
-        print(e)
+    lock = hold_loop_lock(LOCK_FILE)
+    if lock is None:
+        running = read_pid()
+        print(f"Sellbird is already running{f' (pid {running})' if running else ''}. "
+              "Stop it first, from the dashboard or with Ctrl+C in its terminal.")
         sys.exit(1)
-    root_lock = None
-    root_data = root / "data"
-    if only is None:
-        root_lock = hold_loop_lock(root_data / "sellbird.lock")
-        if root_lock is None:
-            running = read_pid(root_data / "sellbird.pid")
-            print(f"Sellbird is already running{f' (pid {running})' if running else ''}. "
-                  "Stop it first, from the dashboard or with Ctrl+C in its terminal.")
-            sys.exit(1)
-        write_pid_file(root_data / "sellbird.pid")
-    held = []
     try:
-        for home in homes:
+        homes = []
+        for name in names:
+            home = projects.project_home(root, name)
             with use_home(home):
-                if _needs_setup():
-                    print(f"Project {home.project} isn't set up yet; skipping it. "
-                          f"Run `sellbird setup --project {home.project}` in a terminal first.")
-                    continue
-                lock = hold_loop_lock()
-                if lock is None:
-                    running = read_pid()
-                    print(f"Project {home.project} is already running"
-                          f"{f' (pid {running})' if running else ''}; skipping it here.")
-                    continue
-                write_pid_file()
-            held.append((home, lock))
-        if not held:
+                why = _cannot_run(home)
+            if why:
+                print(f"{why} Skipping it.")
+                continue
+            homes.append(home)
+        if not homes:
             print("No project can run. See the lines above.")
             sys.exit(1)
+        write_pid_file()
         tag = _ProjectTag()
         for handler in logging.getLogger().handlers:
             handler.addFilter(tag)
-        logger.info(f"Projects: running {', '.join(h.project for h, _ in held)}.")
+        logger.info(f"Projects: running {', '.join(h.project for h in homes)}.")
         try:
-            asyncio.run(_run_with_signals([h for h, _ in held]))
+            asyncio.run(_run_with_signals(homes))
         except KeyboardInterrupt:
             logger.info("Goodbye.")
     finally:
-        for home, lock in held:
-            with use_home(home):
-                remove_pid_file()
-            release_loop_lock(lock)
-        if root_lock is not None:
-            remove_pid_file(root_data / "sellbird.pid")
-            release_loop_lock(root_lock)
+        remove_pid_file()
+        release_loop_lock(lock)
 
 
-def main(project: str | None = None):
-    """Entry point. ``project``: run just that project (projects mode)."""
+def main():
+    """Entry point."""
     from sellbird import projects
     from sellbird.paths import PROJECT_ROOT
 
     names = projects.discover(PROJECT_ROOT)
-    if names or project is not None:
-        _main_projects(PROJECT_ROOT, names, project)
+    if names:
+        _main_projects(PROJECT_ROOT, names)
         return
 
     # Check for first-time setup

@@ -222,16 +222,15 @@ async def _not_on_hosted(request: Request, exc: NotOnHosted):
 async def get_projects():
     """The projects in this install, which one opens first, and which one this
     request is for. Outside projects mode the list is empty and the page shows
-    nothing new. ``loops`` says which projects have a loop running now."""
+    nothing new."""
     root = _install_root()
     names = projects.discover(root)
     if not names:
-        return {"projects": [], "default": None, "current": None, "loops": {}}
+        return {"projects": [], "default": None, "current": None}
     current = current_home().project
     # A name this request asked for that isn't a project falls back to the
     # default here (see _PROJECT_FREE_PATHS), so the page can recover.
-    return {"projects": names, "default": projects.default_project(root), "current": current,
-            "loops": {n: _loop_running(n) for n in names}}
+    return {"projects": names, "default": projects.default_project(root), "current": current}
 
 
 @app.post("/api/projects/select")
@@ -359,60 +358,26 @@ def _write_env_file(updates: dict[str, str]):
     load_dotenv(str(ENV_FILE), override=True)
 
 
-def _live_pid(pid_file: Path, lock_file: Path) -> int | None:
-    """The PID in ``pid_file`` while a loop holds ``lock_file``; a stale file
-    is removed."""
-    if pid_file.exists():
+def _check_sellbird_pid() -> int | None:
+    """Check if there's a running Sellbird process from a PID file."""
+    global _sellbird_process, _sellbird_started_at
+    if _sellbird_process and _sellbird_process.poll() is None:
+        return _sellbird_process.pid
+    if PID_FILE.exists():
         try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             pid = None
         # pid_alive, never os.kill(pid, 0): on Windows that terminates the loop.
         # And only while a loop holds the lock: after a crash or a reboot the
         # PID can belong to an unrelated program, which Stop must not signal.
-        if pid is not None and pid_alive(pid) and loop_lock_held(lock_file):
+        if pid is not None and pid_alive(pid) and loop_lock_held(LOCK_FILE):
             return pid
         try:
-            pid_file.unlink(missing_ok=True)
+            PID_FILE.unlink(missing_ok=True)
         except OSError:
             pass
     return None
-
-
-def _project_loop_files(name: str | None = None) -> tuple[Path, Path] | None:
-    """The PID and lock files of one project's own loop (``sellbird run
-    --project``), which the all-projects loop holds too while it runs that
-    project. None outside projects mode."""
-    name = name or current_home().project
-    if not name:
-        return None
-    data = _install_root() / "projects" / name / "data"
-    return data / "sellbird.pid", data / "sellbird.lock"
-
-
-def _check_sellbird_pid() -> int | None:
-    """The PID of the loop that runs this request's project, or None. In
-    projects mode ``sellbird run`` is one process for every project and
-    keeps the root's PID file and lock, the same files as outside projects
-    mode; a loop started for this project alone (``sellbird run --project``)
-    has the project's own."""
-    global _sellbird_process, _sellbird_started_at
-    if _sellbird_process and _sellbird_process.poll() is None:
-        return _sellbird_process.pid
-    pid = _live_pid(PID_FILE, LOCK_FILE)
-    if pid is not None:
-        return pid
-    files = _project_loop_files()
-    return _live_pid(*files) if files else None
-
-
-def _loop_running(name: str) -> bool:
-    """Whether a loop is running project ``name`` right now. A loop holds a
-    project's own lock while it runs that project, whether it is the
-    all-projects loop or one started for the project alone, so a project the
-    all-projects loop skipped (a config that wouldn't load) reads as stopped."""
-    files = _project_loop_files(name)
-    return bool(files and loop_lock_held(files[1]))
 
 
 # ── Setup Status ──
@@ -1301,10 +1266,8 @@ async def get_sellbird_status():
     status = {"running": pid is not None, "pid": pid, "started_at": started,
               "sending_paused": paused}
     if current_home().project:
-        # One loop serves every project: Start and Stop act on it, and this
-        # says whether it is running this project.
+        # One loop serves every project: Start and Stop act on it.
         status["project"] = current_home().project
-        status["project_running"] = _loop_running(current_home().project)
     return status
 
 
@@ -1405,13 +1368,6 @@ async def stop_sellbird():
     _sellbird_process = None
     _sellbird_started_at = None
     PID_FILE.unlink(missing_ok=True)
-    files = _project_loop_files()
-    if files is not None:
-        try:
-            if int(files[0].read_text(encoding="utf-8").strip()) == pid:
-                files[0].unlink(missing_ok=True)
-        except (OSError, ValueError):
-            pass
 
     return {"success": True}
 

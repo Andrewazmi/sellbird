@@ -142,7 +142,7 @@ def test_check_reports_bad_configs_and_the_shared_quota(tmp_path):
     (tmp_path / "projects" / "segment-b" / "sellbird.yaml").write_text("persona: 3\n", encoding="utf-8")
     (tmp_path / "sellbird.projects.yaml").write_text("default: nope\n", encoding="utf-8")
     problems, warnings = projects_cli.check(tmp_path)
-    assert len(problems) == 1 and problems[0].startswith("segment-b:")
+    assert len(problems) == 1 and problems[0].startswith("Project segment-b:")
     assert any("default: 'nope'" in w for w in warnings)
 
 
@@ -182,3 +182,95 @@ def test_training_a_project_writes_its_own_skills(tmp_path):
     with use_home(Home.for_project(tmp_path, "segment-b")):
         assert _skills_dir() == tmp_path / "projects" / "segment-b" / "skills"
         assert _skills_dir().is_dir()
+
+
+# ── Every command in projects mode: its project, or the whole install (review B4) ──
+
+
+@pytest.fixture
+def two_projects(tmp_path, monkeypatch):
+    from sellbird import home, paths
+    monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(home, "seed_home", lambda *a, **k: None)
+    monkeypatch.delenv("SELLBIRD_PROJECT", raising=False)
+    for name, company in (("product-a", "Example Roofing"), ("segment-b", "Example Dental")):
+        h = make_project(tmp_path, name, company)
+        asyncio.run(StateManager(str(h.db_path)).init_db())
+    return tmp_path
+
+
+def _sellbird(monkeypatch, *argv):
+    import sys
+    from sellbird import cli
+    monkeypatch.setattr(sys, "argv", ["sellbird", *argv])
+    cli.main()
+
+
+def _setting(root, name, key):
+    db = root / "projects" / name / "data" / "sellbird.db"
+    return asyncio.run(StateManager(str(db)).get_setting(key))
+
+
+def test_sending_pause_without_a_project_pauses_every_project(two_projects, monkeypatch):
+    _sellbird(monkeypatch, "sending", "pause")
+    assert _setting(two_projects, "product-a", "sending_paused")
+    assert _setting(two_projects, "segment-b", "sending_paused")
+    _sellbird(monkeypatch, "--project", "segment-b", "sending", "resume")
+    assert _setting(two_projects, "product-a", "sending_paused")
+    assert not _setting(two_projects, "segment-b", "sending_paused")
+    assert not (two_projects / "data" / "sellbird.db").exists()
+
+
+def test_a_suppression_from_the_cli_goes_to_the_shared_list(two_projects, monkeypatch):
+    _sellbird(monkeypatch, "suppressions", "add", "gone@other.example")
+    for name in ("product-a", "segment-b"):
+        with use_home(projects.project_home(two_projects, name)):
+            assert asyncio.run(StateManager().is_suppressed("gone@other.example"))
+    assert not (two_projects / "data" / "sellbird.db").exists()
+
+
+def test_a_project_command_without_a_project_is_refused(two_projects, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _sellbird(monkeypatch, "outbox")
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "product-a, segment-b" in out and "--project NAME outbox" in out
+    assert not (two_projects / "data" / "sellbird.db").exists()
+
+
+def test_a_project_comes_from_the_flag_or_the_environment(two_projects, monkeypatch):
+    seen = []
+    import sellbird.cli as cli
+    monkeypatch.setattr(cli, "cmd_outbox", lambda args: seen.append(StateManager().db_path))
+    _sellbird(monkeypatch, "--project", "segment-b", "outbox")
+    monkeypatch.setenv("SELLBIRD_PROJECT", "product-a")
+    _sellbird(monkeypatch, "outbox")
+    assert seen == [str(two_projects / "projects" / n / "data" / "sellbird.db")
+                    for n in ("segment-b", "product-a")]
+    with pytest.raises(SystemExit) as exc:
+        _sellbird(monkeypatch, "--project", "nope", "outbox")
+    assert exc.value.code == 1
+
+
+def test_a_project_flag_without_projects_is_refused(tmp_path, monkeypatch, capsys):
+    from sellbird import home, paths
+    monkeypatch.setattr(paths, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(home, "seed_home", lambda *a, **k: None)
+    with pytest.raises(SystemExit) as exc:
+        _sellbird(monkeypatch, "--project", "product-a", "outbox")
+    assert exc.value.code == 2 and "no projects" in capsys.readouterr().out
+
+
+def test_check_refuses_instantly_and_warns_about_a_shared_inbox_with_no_cap(tmp_path):
+    make_project(tmp_path, "product-a", "Example Roofing")
+    make_project(tmp_path, "segment-b", "Example Dental")       # same template address
+    problems, warnings = projects_cli.check(tmp_path)
+    assert problems == []
+    assert any("inbox_daily_cap is 0" in w and "product-a, segment-b" in w for w in warnings)
+    (tmp_path / "sellbird.projects.yaml").write_text("inbox_daily_cap: 30\n", encoding="utf-8")
+    assert not any("inbox_daily_cap" in w for w in projects_cli.check(tmp_path)[1])
+    legacy = make_project(tmp_path, "legacy-c", "Example Legacy")
+    legacy.config_file.write_text(trained("Example Legacy").replace(
+        'provider: "gmail"', 'provider: "instantly"', 1), encoding="utf-8")
+    problems, _ = projects_cli.check(tmp_path)
+    assert len(problems) == 1 and "legacy-c sends through Instantly" in problems[0]

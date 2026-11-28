@@ -247,7 +247,7 @@ def plain(tmp_path, monkeypatch):
 
 def test_outside_projects_mode_the_list_is_empty(plain):
     assert plain.get("/api/projects").json() == {
-        "projects": [], "default": None, "current": None, "loops": {}}
+        "projects": [], "default": None, "current": None}
 
 
 def test_outside_projects_mode_routes_work_as_before(plain):
@@ -277,28 +277,14 @@ def _hold(lock: Path, pid_file: Path):
     return handle
 
 
-def test_the_all_projects_loop_reads_as_running_in_every_project(client, install):
+def test_the_one_loop_reads_as_running_in_every_project(client, install):
     assert client.get("/api/sellbird/status", headers={HEADER: "alpha"}).json()["running"] is False
     handle = _hold(install / "data" / "sellbird.lock", install / "data" / "sellbird.pid")
     try:
         for name in ("alpha", "beta"):
             status = client.get("/api/sellbird/status", headers={HEADER: name}).json()
             assert status["running"] is True and status["pid"] == os.getpid()
-            # ...but only a project whose own lock is held is being run.
-            assert status["project"] == name and status["project_running"] is False
-    finally:
-        pidfile.release_loop_lock(handle)
-
-
-def test_a_loop_started_for_one_project_shows_only_there(client, install):
-    folder = install / "projects" / "beta" / "data"
-    handle = _hold(folder / "sellbird.lock", folder / "sellbird.pid")
-    try:
-        beta = client.get("/api/sellbird/status", headers={HEADER: "beta"}).json()
-        alpha = client.get("/api/sellbird/status", headers={HEADER: "alpha"}).json()
-        assert beta["running"] is True and beta["project_running"] is True
-        assert alpha["running"] is False and alpha["project_running"] is False
-        assert client.get("/api/projects").json()["loops"] == {"alpha": False, "beta": True}
+            assert status["project"] == name
         # Start refuses while it runs (nothing is launched).
         r = client.post("/api/sellbird/start", headers={HEADER: "beta"}).json()
         assert r == {"success": False, "message": "Sellbird is already running."}
@@ -307,7 +293,7 @@ def test_a_loop_started_for_one_project_shows_only_there(client, install):
 
 
 def test_a_stale_pid_file_is_removed_and_never_signalled(client, install):
-    pid_file = install / "projects" / "alpha" / "data" / "sellbird.pid"
+    pid_file = install / "data" / "sellbird.pid"
     pid_file.write_text(str(os.getpid()), encoding="utf-8")        # alive, but no lock held
     assert client.get("/api/sellbird/status", headers={HEADER: "alpha"}).json()["running"] is False
     assert not pid_file.exists()

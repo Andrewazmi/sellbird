@@ -93,20 +93,48 @@ def check(root: Path) -> tuple[list[str], list[str]]:
     if settings.default and settings.default not in names:
         warnings.append(f"default: {settings.default!r} isn't a project; the dashboard opens {names[0]}.")
     total = 0
+    inboxes: dict[str, list[str]] = {}
     for name in names:
-        with use_home(Home.for_project(root, name)):
-            try:
-                config = load_config()
-            except Exception as e:
-                problems.append(f"{name}: {e}")
-                continue
+        home = Home.for_project(root, name)
+        problem = projects.config_problem(home)
+        if problem:
+            problems.append(problem)
+            continue
+        with use_home(home):
+            config = load_config()
         total += config.usage.max_daily_claude_percent
         if config.persona.company in UNTRAINED:
             warnings.append(f"{name}: not trained yet; `sellbird setup --project {name}`.")
+        for address in _sending_addresses(config, home.db_path):
+            inboxes.setdefault(address, []).append(name)
     if total > 100:
         warnings.append(f"The projects' usage.max_daily_claude_percent add up to {total:g}%, "
                         "and they all spend one Claude account.")
+    if not settings.inbox_daily_cap:
+        for address, users in sorted(inboxes.items()):
+            if len(users) > 1:
+                warnings.append(
+                    f"{address} sends for {', '.join(users)}, and inbox_daily_cap is 0: each "
+                    "project counts only its own email on it, so together they send more than "
+                    "its warm-up allows. Set inbox_daily_cap in sellbird.projects.yaml.")
     return problems, warnings
+
+
+def _sending_addresses(config, db_path: Path) -> set[str]:
+    """The inboxes a project sends from: its main address and its extra inboxes."""
+    from sellbird.integrations.mail_provider import identity_from_config
+    found = {(identity_from_config(config).address or "").strip().lower()}
+    if db_path.exists():
+        db = sqlite3.connect(db_path)
+        try:
+            found |= {(r[0] or "").strip().lower()
+                      for r in db.execute("SELECT address FROM mailboxes")}
+        except sqlite3.Error:
+            pass      # no mailboxes table yet
+        finally:
+            db.close()
+    found.discard("")
+    return found
 
 
 def cmd_check(root: Path) -> int:

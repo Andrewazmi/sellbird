@@ -1830,11 +1830,8 @@ async function loadSellbirdStatus() {
   label.textContent = running ? 'Running' : 'Stopped';
 
   const meta = document.getElementById('control-meta');
-  // With projects there is one loop for all of them; say so, and when it is
-  // running but skipping this project (its settings didn't load).
-  const scope = !data.project ? '' : !running ? ' One loop runs every project.'
-    : data.project_running ? ' &middot; runs every project'
-    : ' &middot; not running ' + escHtml(data.project) + ' (check its settings)';
+  // With projects there is one loop for all of them: say so.
+  const scope = !data.project ? '' : running ? ' &middot; runs every project' : ' One loop runs every project.';
   if (running && data.pid) {
     let info = 'PID ' + escHtml(String(data.pid));
     if (data.started_at) info += ' &middot; started ' + formatDate(data.started_at);
@@ -5816,10 +5813,9 @@ async function initProjects() {
   const current = data.projects.includes(data.current) ? data.current : (data.default || data.projects[0]);
   setCurrentProject(current);
   const select = document.getElementById('project-select');
-  const loops = data.loops || {};
   select.innerHTML = data.projects.map(name =>
     '<option value="' + escHtml(name) + '"' + (name === current ? ' selected' : '') + '>' +
-    escHtml(name) + (loops[name] ? ' \u00b7 running' : '') + '</option>').join('');
+    escHtml(name) + '</option>').join('');
   wrap.hidden = false;
   document.title = 'Sellbird \u00b7 ' + current;
 }

@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from sellbird.workspace_home import Home, current_home
+from sellbird.workspace_home import Home, current_home, use_home
 
 logger = logging.getLogger("sellbird.projects")
 
@@ -137,6 +137,24 @@ def live_settings(root: Path) -> ProjectsSettings:
         raise
     _last_good[str(path)] = (stamp, settings)
     return settings
+
+
+# Not in v1: claims and the shared inbox count live in the native Sender.
+INSTANTLY_REFUSED = ("sends through Instantly, which projects don't support yet. "
+                     "Set channels.email.provider to gmail, microsoft or smtp in its sellbird.yaml.")
+
+
+def config_problem(home: Home) -> str:
+    """Why this project's config can't run in projects mode, or ""."""
+    from sellbird.config import load_config
+    with use_home(home):
+        try:
+            config = load_config()
+        except Exception as e:
+            return f"Project {home.project}: {e}"
+    if getattr(config.channels.email, "provider", "") == "instantly":
+        return f"Project {home.project} {INSTANTLY_REFUSED}"
+    return ""
 
 
 def default_project(root: Path) -> str | None:

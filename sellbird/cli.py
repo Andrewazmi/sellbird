@@ -133,7 +133,7 @@ def cmd_run(args):
     """Start Sellbird's heartbeat loop."""
     from sellbird.main import main
 
-    main(project=getattr(args, "project", None))
+    main()
 
 
 def cmd_train(args):
@@ -1327,6 +1327,60 @@ def cmd_recommended(args):
     print()
 
 
+# Projects mode (sellbird.projects): commands that are the install's, not a
+# project's, and run as they are. `mcp` picks its project itself.
+NO_PROJECT_COMMANDS = {"install", "run", "dashboard", "gmail", "microsoft", "precleared-key",
+                       "mcp", "connect", "autostart", "tray", "recommended", "projects"}
+# Without a project these act on the whole install: `sending` on every
+# project, `suppressions` on the list every project shares.
+INSTALL_WIDE_COMMANDS = {"sending", "suppressions"}
+
+
+def _dispatch(args, root) -> None:
+    """Run the command, in its project's home in projects mode."""
+    import os
+    from sellbird import projects
+    from sellbird.workspace_home import use_home
+
+    asked = (getattr(args, "project", None) or args.global_project
+             or os.environ.get("SELLBIRD_PROJECT", "").strip() or None)
+    names = projects.discover(root)
+    if not names or args.command == "projects":
+        if asked and args.command not in ("projects", "mcp"):
+            print(f"\n  This install has no projects, so --project {asked} means nothing here.\n")
+            sys.exit(2)
+        args.func(args)
+        return
+    if args.command == "mcp":
+        args.project = asked
+    if args.command in NO_PROJECT_COMMANDS:
+        args.func(args)
+        return
+    if asked:
+        try:
+            home = projects.project_home(root, asked)
+        except projects.UnknownProject as e:
+            print(f"\n  {e} Projects here: {', '.join(names)}.\n")
+            sys.exit(1)
+        with use_home(home):
+            args.func(args)
+        return
+    if args.command == "sending":
+        for name in names:
+            print(f"  {name}:", end="")
+            with use_home(projects.project_home(root, name)):
+                args.func(args)
+        return
+    if args.command == "suppressions":
+        # Any project's view adds to and removes from the shared list.
+        with use_home(projects.project_home(root, projects.default_project(root))):
+            args.func(args)
+        return
+    print(f"\n  This install has projects ({', '.join(names)}). Say which one:\n"
+          f"    sellbird --project NAME {args.command} ...   (or set SELLBIRD_PROJECT)\n")
+    sys.exit(2)
+
+
 def main():
     from sellbird.textio import utf8_stdio
     utf8_stdio()
@@ -1337,6 +1391,9 @@ def main():
         prog="sellbird",
         description="Sellbird — the open-source outreach platform. Make the first move.",
     )
+    parser.add_argument("--project", dest="global_project", metavar="NAME", default=None,
+                        help="The project a command works on, in an install with several "
+                             "(or set SELLBIRD_PROJECT)")
     subparsers = parser.add_subparsers(dest="command")
 
     # sellbird install
@@ -1350,8 +1407,6 @@ def main():
 
     # sellbird run
     sub = subparsers.add_parser("run", help="Start Sellbird's heartbeat loop")
-    sub.add_argument("--project", metavar="NAME",
-                     help="Run just this project (projects mode; default: every project)")
     sub.set_defaults(func=cmd_run)
 
     # sellbird train <url>
@@ -1625,20 +1680,7 @@ def main():
         sys.exit(0)
 
     try:
-        project = getattr(args, "project", None)
-        if project and args.command in ("setup", "train"):
-            # Projects mode: the command reads and writes that project's files.
-            from sellbird.projects import UnknownProject, project_home
-            from sellbird.workspace_home import use_home
-            try:
-                chosen = project_home(home_root, project)
-            except UnknownProject as e:
-                print(f"\n  {e}\n")
-                sys.exit(1)
-            with use_home(chosen):
-                args.func(args)
-        else:
-            args.func(args)
+        _dispatch(args, home_root)
     except KeyboardInterrupt:
         print("\n  Interrupted. Goodbye.")
         sys.exit(130)
